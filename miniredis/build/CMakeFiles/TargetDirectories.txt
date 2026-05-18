@@ -1,0 +1,3 @@
+/home/wcl/miniredis/build/CMakeFiles/miniredis.dir
+/home/wcl/miniredis/build/CMakeFiles/edit_cache.dir
+/home/wcl/miniredis/build/CMakeFiles/rebuild_cache.dir
