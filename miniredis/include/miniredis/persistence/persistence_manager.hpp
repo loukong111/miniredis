@@ -1,0 +1,38 @@
+#pragma once
+
+#include "miniredis/core/cache_store.hpp"
+#include "miniredis/persistence/file_persistence.hpp"
+#include "miniredis/core/thread_pool.hpp"
+#include <atomic>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
+
+namespace miniredis {
+
+class PersistenceManager {
+public:
+    PersistenceManager(CacheStore& cache, const std::string& snapshot_file, 
+        DynamicThreadPool& pool, int interval_sec = 20);
+    ~PersistenceManager();
+
+    void start();
+    void stop();
+    bool takeSnapshot();
+
+private:
+    void workerLoop();
+    bool saveSnapshotToFile();
+    bool loadSnapshotFromFile();
+
+    CacheStore& cache_;
+    FilePersistence file_persistence_;
+    DynamicThreadPool& pool_;
+    int snapshot_interval_sec_;
+    std::atomic<bool> running_;
+    std::thread worker_;
+    std::mutex mutex_;
+    std::condition_variable cv_;
+};
+
+} // namespace miniredis

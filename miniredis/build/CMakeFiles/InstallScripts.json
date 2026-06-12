@@ -1,7 +1,0 @@
-{
-	"InstallScripts" : 
-	[
-		"/home/wcl/miniredis/build/cmake_install.cmake"
-	],
-	"Parallel" : false
-}
