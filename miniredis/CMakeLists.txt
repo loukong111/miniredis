@@ -5,6 +5,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# 项目通过 option 控制测试维度，实现“开发构建”和“CI 构建”分离。
 option(MINIREDIS_ENABLE_INTEGRATION_TESTS "Enable redis-cli/curl based integration tests" ON)
 
 find_library(MYSQL_CLIENT_LIB mysqlclient)
@@ -66,6 +67,7 @@ add_executable(miniredis_unit_tests
     ${CMAKE_SOURCE_DIR}/src/core/cache_store.cpp
     ${CMAKE_SOURCE_DIR}/src/persistence/file_persistence.cpp
     ${CMAKE_SOURCE_DIR}/src/core/memory_pool.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/thread_pool.cpp
     ${CMAKE_SOURCE_DIR}/src/net/resp_parser.cpp
     ${CMAKE_SOURCE_DIR}/src/cluster/consistent_hash.cpp
     ${CMAKE_SOURCE_DIR}/src/cluster/cluster_utils.cpp

@@ -85,17 +85,11 @@ void DynamicThreadPool::try_expand() {
     if (pending > current && current < max_threads_ && idle_threads_ == 0) {
         workers_.emplace_back(&DynamicThreadPool::worker_loop, this);
         active_threads_++;
-        // 可选：打印日志
-        // std::cout << "[ThreadPool] Expanded to " << active_threads_ << " threads\n";
     }
 }
 
 void DynamicThreadPool::try_shrink() {
-    // 缩容条件：
-    // 1. 当前工作线程数 > 最小线程数
-    // 2. 任务队列为空
-    // 3. 空闲线程数 > 0（说明有空闲线程可以回收）
-    // 4. 并且没有任务在等待（已经由队列空保证）
+    // 缩容条件：当前工作线程数 > 最小线程数，任务队列为空，空闲线程数 > 0（说明有空闲线程可以回收）
     size_t current = active_threads_;
     if (current <= min_threads_) return;
     // 检查任务队列是否为空（加锁）

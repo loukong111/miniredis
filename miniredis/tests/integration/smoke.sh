@@ -87,6 +87,7 @@ run_auth_kv_stats_snapshot_smoke() {
   assert_eq "$("${REDIS_CLI}" -p "${port}" -a secret --raw EXISTS alpha 2>/dev/null)" "1" "exists alpha"
   assert_eq "$("${REDIS_CLI}" -p "${port}" -a secret --raw DEL alpha 2>/dev/null)" "1" "del alpha"
   assert_eq "$("${REDIS_CLI}" -p "${port}" -a secret --raw EXISTS alpha 2>/dev/null)" "0" "exists deleted alpha"
+  assert_eq "$("${REDIS_CLI}" -p "${port}" -a secret --raw COMMAND COUNT 2>/dev/null)" "8" "command count"
 
   local stats
   stats="$("${CURL}" -fsS "http://127.0.0.1:${stats_port}/stats")"

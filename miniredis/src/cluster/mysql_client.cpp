@@ -73,6 +73,7 @@ bool MySQLClient::loadAll(std::unordered_map<std::string, std::string>& out) {
     if (!res) return false;
     MYSQL_ROW row;
     out.clear();
+    //旧版格式key空格value
     while ((row = mysql_fetch_row(res))) {
         if (row[0] && row[1]) out[row[0]] = row[1];
     }

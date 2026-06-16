@@ -2,6 +2,7 @@
 #include <mutex>
 #include <cstring>
 #include <iostream>
+#include <new>
 
 namespace miniredis {
 
@@ -18,7 +19,7 @@ bool CacheEntry::setValue(const std::string& value, FixedMemoryPool& pool) {
         std::memcpy(data, value.data(), size);
     } else {
         // 大值：直接 new 字节数组
-        data = new char[size];
+        data = new (std::nothrow) char[size];
         if (!data) return false;
         is_pool_allocated = false;
         std::memcpy(data, value.data(), size);
@@ -40,7 +41,7 @@ void CacheEntry::release(FixedMemoryPool& pool) {
     }
     data = nullptr;
     size = 0;
-    is_pool_allocated = true; //默认为true，不写也行
+    is_pool_allocated = true; 
 }
 
 CacheStore::CacheStore(FixedMemoryPool& pool) : pool_(pool) {}
@@ -66,11 +67,14 @@ void CacheStore::set(const std::string& key, const std::string& value, int ttl_s
 }
 
 std::optional<std::string> CacheStore::get(const std::string& key) {
-    std::shared_lock lock(mtx_);
-    auto it = store_.find(key);
-    if (it == store_.end()) return std::nullopt;
-    if (it->second.is_expired()) return std::nullopt;
-    return it->second.getValue();
+    {
+        std::shared_lock lock(mtx_);
+        auto it = store_.find(key);
+        if (it == store_.end()) return std::nullopt;
+        if (!it->second.is_expired()) return it->second.getValue();
+    }
+    erase_if_expired(key);
+    return std::nullopt;
 }
 
 bool CacheStore::del(const std::string& key) {
@@ -83,10 +87,23 @@ bool CacheStore::del(const std::string& key) {
 }
 
 bool CacheStore::exists(const std::string& key) {
-    std::shared_lock lock(mtx_);
+    {
+        std::shared_lock lock(mtx_);
+        auto it = store_.find(key);
+        if (it == store_.end()) return false;
+        if (!it->second.is_expired()) return true;
+    }
+    erase_if_expired(key);
+    return false;
+}
+
+bool CacheStore::erase_if_expired(const std::string& key) {
+    std::unique_lock lock(mtx_);
     auto it = store_.find(key);
-    if (it == store_.end()) return false;
-    return !it->second.is_expired();
+    if (it == store_.end() || !it->second.is_expired()) return false;
+    it->second.release(pool_);
+    store_.erase(it);
+    return true;
 }
 
 size_t CacheStore::cleanup() {

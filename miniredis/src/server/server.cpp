@@ -331,9 +331,11 @@ void MiniRedisServer::stop() {
     running_ = false;
     stats_running_ = false;
 
+#ifdef HAVE_MYSQL
     if (config_.cluster_mode && mysql_) {
         mysql_->unregisterNode(current_node_);
     }
+#endif
     if (cluster_refresh_thread_.joinable()) cluster_refresh_thread_.join();
 
     scheduler_.stop();
@@ -347,6 +349,7 @@ void MiniRedisServer::stop() {
         listen_fd_ = -1;
     }
 
+    //防止 MiniRedisServer 对象销毁后，信号处理函数还持有一个已经失效的指针。
     if (g_running_signal_target == &running_) {
         g_running_signal_target = nullptr;
     }

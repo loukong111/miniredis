@@ -27,11 +27,9 @@ struct RespValue {
 // RESP 解码器（增量式，处理半包）
 class RespDecoder {
 public:
-    // 将新数据追加到缓冲区
+    //在这里，feed 会把 string_view 里的内容追加到自己的 buffer_，所以调用方不用构造完整 std::string
     void feed(std::string_view data);
-    
-    // 尝试解析一个完整的 RESP 值
-    // 如果解析成功返回值，并移除已解析的数据；否则返回 nullopt
+
     std::optional<RespValue> parse();
 
     // 重置解码器（清空缓冲区）

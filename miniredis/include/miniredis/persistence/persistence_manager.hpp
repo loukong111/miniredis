@@ -26,6 +26,7 @@ private:
     bool loadSnapshotFromFile();
 
     CacheStore& cache_;
+    //FilePersistence 很轻，只需要一个文件路径。所以没必要引用
     FilePersistence file_persistence_;
     DynamicThreadPool& pool_;
     int snapshot_interval_sec_;

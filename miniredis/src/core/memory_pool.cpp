@@ -51,7 +51,7 @@ void* FixedMemoryPool::allocate() {
     free_list_ = block->next;
     used_.fetch_add(1, std::memory_order_relaxed);
     free_.fetch_sub(1, std::memory_order_relaxed);
-    // 这里直接返回Block起始地址，用户使用大小不会超过BLOCK_SIZE
+    // 这里直接返回Block起始地址，因为用户使用大小不会超过BLOCK_SIZE
     return reinterpret_cast<void*>(block);
 }
 

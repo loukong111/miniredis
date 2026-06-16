@@ -15,6 +15,7 @@ namespace {
 
 constexpr const char* kSnapshotMagic = "MINIREDIS_SNAPSHOT_V1";
 constexpr uint64_t kMaxEntrySize = 512ULL * 1024ULL * 1024ULL;
+constexpr uint64_t kMaxSnapshotEntries = 1'000'000ULL;
 
 bool writeU64(std::ostream& os, uint64_t value) {
     os.write(reinterpret_cast<const char*>(&value), sizeof(value));
@@ -69,6 +70,11 @@ bool loadLegacyTextSnapshot(const std::string& path,
 FilePersistence::FilePersistence(const std::string& filepath) : filepath_(filepath) {}
 
 bool FilePersistence::saveSnapshot(const std::unordered_map<std::string, std::string>& data) {
+    if (data.size() > kMaxSnapshotEntries) {
+        std::cerr << "Snapshot has too many entries: " << data.size() << std::endl;
+        return false;
+    }
+
     const std::string tmp_path = filepath_ + ".tmp";
     {
         std::ofstream ofs(tmp_path, std::ios::binary | std::ios::trunc);
@@ -134,6 +140,11 @@ bool FilePersistence::loadSnapshot(std::unordered_map<std::string, std::string>&
     uint64_t count = 0;
     if (!readU64(ifs, count)) {
         std::cerr << "Invalid snapshot header: " << filepath_ << std::endl;
+        return false;
+    }
+    if (count > kMaxSnapshotEntries ||
+        count > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+        std::cerr << "Snapshot entry count too large: " << count << std::endl;
         return false;
     }
 

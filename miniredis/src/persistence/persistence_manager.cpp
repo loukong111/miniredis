@@ -36,6 +36,7 @@ void PersistenceManager::workerLoop() {
         });
         if (!running_) break;
         lock.unlock();
+        //必须future阻塞等待，因为如果前一次保存很慢，用了20+秒。这样下一个快照任务会写入同一个snapshot文件
         auto future = pool_.submit([this]() { this->saveSnapshotToFile(); });
         future.get();//等待保存
     }

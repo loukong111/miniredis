@@ -47,11 +47,12 @@ void Scheduler::start() {
 }
 
 void Scheduler::stop() {
+    //只有之前在运行，才需要写 wake_fd_ 唤醒 epoll_wait。如果已经停止了，就没必要重复唤醒。
     bool was_running = running_.exchange(false);
     if (was_running && wake_fd_ != -1) {
         uint64_t value = 1;
         ssize_t ignored = write(wake_fd_, &value, sizeof(value));
-        (void)ignored;
+        (void)ignored;//消除编译器「变量未使用」警告
     }
 }
 
@@ -130,6 +131,7 @@ void Scheduler::handle_events(int, struct epoll_event* events, int nfds) {
                 // 下一次 await_io 会调用 add_fd，它会更新 map 中的 handle 并修改 epoll 事件
             }
         }
+        //释放锁后再 resume避免协程恢复后重新进入调度器导致死锁。
         if (handle) {
             handle.resume();
         }

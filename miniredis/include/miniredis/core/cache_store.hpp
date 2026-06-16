@@ -44,6 +44,8 @@ public:
     void load_snapshot(const std::unordered_map<std::string, std::string>& data);
 
 private:
+    bool erase_if_expired(const std::string& key);
+
     FixedMemoryPool& pool_;
     mutable std::shared_mutex mtx_;
     std::unordered_map<std::string, CacheEntry> store_;

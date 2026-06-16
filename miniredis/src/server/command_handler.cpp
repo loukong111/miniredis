@@ -4,8 +4,69 @@
 #include <cctype>
 #include <sstream>
 #include <utility>
+#include <vector>
 
 namespace miniredis {
+namespace {
+
+struct CommandSpec {
+    const char* name;
+    int arity;
+    std::vector<const char*> flags;
+    int first_key;
+    int last_key;
+    int step;
+};
+
+const std::vector<CommandSpec>& commandTable() {
+    static const std::vector<CommandSpec> specs = {
+        {"ping",  -1, {"fast"},                  0,  0, 0},
+        {"auth",   2, {"noscript", "fast"},      0,  0, 0},
+        {"set",    3, {"write", "denyoom"},      1,  1, 1},
+        {"get",    2, {"readonly", "fast"},      1,  1, 1},
+        {"del",   -2, {"write"},                 1, -1, 1},
+        {"exists",-2, {"readonly", "fast"},      1, -1, 1},
+        {"command",-1, {"loading", "stale"},     0,  0, 0},
+        {"cluster",-2, {"admin", "stale"},       0,  0, 0},
+    };
+    return specs;
+}
+
+std::string respArray(const std::vector<std::string>& encoded_items) {
+    std::string result = "*" + std::to_string(encoded_items.size()) + "\r\n";
+    for (const auto& item : encoded_items) {
+        result += item;
+    }
+    return result;
+}
+
+std::string commandSpecResponse(const CommandSpec& spec) {
+    std::vector<std::string> flags;
+    flags.reserve(spec.flags.size());
+    for (const char* flag : spec.flags) {
+        flags.push_back(RespWriter::bulkString(flag));
+    }
+
+    return respArray({
+        RespWriter::bulkString(spec.name),
+        RespWriter::integer(spec.arity),
+        respArray(flags),
+        RespWriter::integer(spec.first_key),
+        RespWriter::integer(spec.last_key),
+        RespWriter::integer(spec.step),
+    });
+}
+
+std::string commandTableResponse() {
+    std::vector<std::string> commands;
+    commands.reserve(commandTable().size());
+    for (const auto& spec : commandTable()) {
+        commands.push_back(commandSpecResponse(spec));
+    }
+    return respArray(commands);
+}
+
+} // namespace
 
 CommandHandler::CommandHandler(CacheStore& cache, FixedMemoryPool& memory_pool,
                                const AppConfig& config, bool cluster_mode,
@@ -41,15 +102,16 @@ std::string CommandHandler::routeIfNeeded(const std::string& cmd_name, const Res
     }
 
     std::string target;
+    uint16_t slot = clusterHashSlot(key_arg.str);
     {
         std::lock_guard<std::mutex> lock(*hash_ring_mutex_);
-        target = hash_ring_->GetNode(key_arg.str);
+        target = hash_ring_->GetNode(std::to_string(slot));
     }
     if (target.empty()) {
         return RespWriter::error("cluster has no active nodes");
     }
     if (target != current_node_) {
-        return "-MOVED " + std::to_string(clusterHashSlot(key_arg.str)) + " " + target + "\r\n";
+        return "-MOVED " + std::to_string(slot) + " " + target + "\r\n";
     }
     return {};
 }
@@ -89,6 +151,8 @@ std::string CommandHandler::handleClusterCommand(const RespValue& cmd) const {
         oss << "cluster_state:" << (cluster_mode_ && nodes.empty() ? "fail" : "ok") << "\r\n";
         oss << "cluster_known_nodes:" << nodes.size() << "\r\n";
         oss << "cluster_current_node:" << current_node_ << "\r\n";
+        //Redis 的很多 info 类命令会返回一整段文本，所以用 bulk string 很合适。
+        //$96\r\ncluster_enabled:1\r\ncluster_state:ok\r\ncluster_known_nodes:2\r\ncluster_current_node:127.0.0.1:6366\r\n\r\n
         return RespWriter::bulkString(oss.str());
     }
 
@@ -153,7 +217,10 @@ std::string CommandHandler::handle(const RespValue& cmd, bool& authenticated) {
     }
 
     std::string route_response = routeIfNeeded(cmd_name, cmd);
-    if (!route_response.empty()) return route_response;
+    if (!route_response.empty()) {
+        Stats::instance().recordCommand(cmd_name);
+        return route_response;
+    }
 
     if (cmd_name == "GET") {
         if (cmd.array.size() != 2) return RespWriter::error("wrong number of arguments for 'get'");
@@ -219,7 +286,19 @@ std::string CommandHandler::handle(const RespValue& cmd, bool& authenticated) {
 
     if (cmd_name == "COMMAND") {
         Stats::instance().recordCommand(cmd_name);
-        return RespWriter::array({});
+        if (cmd.array.size() == 1) {
+            return commandTableResponse();
+        }
+        if (cmd.array.size() == 2 && cmd.array[1].type == RespType::BULK_STRING) {
+            std::string subcmd = cmd.array[1].str;
+            for (char& c : subcmd) {
+                c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+            }
+            if (subcmd == "COUNT") {
+                return RespWriter::integer(static_cast<long long>(commandTable().size()));
+            }
+        }
+        return RespWriter::error("unsupported COMMAND subcommand");
     }
 
     Stats::instance().recordCommand(cmd_name);
