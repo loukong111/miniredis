@@ -1,6 +1,0 @@
-set(__QT_DEPLOY_TARGET_miniredis_qt_console_FILE /home/wcl/miniredis/build-qt/tools/qt_console/miniredis_qt_console)
-set(__QT_DEPLOY_TARGET_miniredis_qt_console_TYPE EXECUTABLE)
-set(__QT_DEPLOY_TARGET_miniredis_FILE /home/wcl/miniredis/build-qt/miniredis)
-set(__QT_DEPLOY_TARGET_miniredis_TYPE EXECUTABLE)
-set(__QT_DEPLOY_TARGET_miniredis_unit_tests_FILE /home/wcl/miniredis/build-qt/miniredis_unit_tests)
-set(__QT_DEPLOY_TARGET_miniredis_unit_tests_TYPE EXECUTABLE)
