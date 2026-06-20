@@ -9,6 +9,7 @@
 #include <thread>
 #include <atomic>
 #include <mutex>
+#include <queue>
 
 namespace miniredis {
 
@@ -28,7 +29,7 @@ struct Task {
         Task get_return_object() {
             return Task{std::coroutine_handle<promise_type>::from_promise(*this)};
         }
-        std::suspend_never initial_suspend() { return {}; }
+        std::suspend_always initial_suspend() { return {}; }
         std::suspend_always final_suspend() noexcept { return {}; }
         void return_void() {}
         void unhandled_exception() {}
@@ -57,7 +58,7 @@ public:
     void start();
     void stop();
 
-    void schedule_task(Task task);   // 暂不实现，可留空或后续扩展
+    void schedule_task(Task task);
 
     IoAwaitable await_io(int fd, uint32_t events);
 
@@ -67,6 +68,9 @@ public:
 
 private:
     void run_loop();
+    void enqueue_ready(std::coroutine_handle<> handle);
+    void run_ready_tasks();
+    void cleanup_completed_tasks();
     void handle_events(int epollfd, struct epoll_event* events, int nfds);
 
     int epoll_fd_;
@@ -74,6 +78,9 @@ private:
     std::atomic<bool> running_;
     std::unordered_map<int, std::coroutine_handle<>> fd_to_handle_;
     std::mutex map_mutex_;
+    std::vector<Task> tasks_;
+    std::queue<std::coroutine_handle<>> ready_queue_;
+    std::mutex task_mutex_;
 };
 
 }

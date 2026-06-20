@@ -22,6 +22,7 @@ public:
 
 private:
     void workerLoop();
+    void submitSnapshotIfIdle();
     bool saveSnapshotToFile();
     bool loadSnapshotFromFile();
 
@@ -31,6 +32,7 @@ private:
     DynamicThreadPool& pool_;
     int snapshot_interval_sec_;
     std::atomic<bool> running_;
+    std::atomic<bool> snapshot_running_;
     std::thread worker_;
     std::mutex mutex_;
     std::condition_variable cv_;

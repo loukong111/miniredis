@@ -1,6 +1,6 @@
 #include "miniredis/core/cache_store.hpp"
 #include "miniredis/cluster/cluster_utils.hpp"
-#include "miniredis/cluster/consistent_hash.hpp"
+#include "miniredis/cluster/slot_map.hpp"
 #include "miniredis/persistence/file_persistence.hpp"
 #include "miniredis/core/memory_pool.hpp"
 #include "miniredis/core/thread_pool.hpp"
@@ -156,6 +156,25 @@ static void testCacheStoreTtlCleanup() {
     assert(pool.used_blocks() == 1);
 }
 
+static void testCacheStoreTtlQuery() {
+    FixedMemoryPool pool(2);
+    CacheStore cache(pool);
+
+    assert(cache.ttl("missing") == -2);
+    cache.set("persistent", "v");
+    assert(cache.ttl("persistent") == -1);
+    assert(cache.expire("persistent", 2));
+    long long ttl = cache.ttl("persistent");
+    assert(ttl >= 1 && ttl <= 2);
+
+    cache.set("expiring", "v", 2);
+    ttl = cache.ttl("expiring");
+    assert(ttl >= 1 && ttl <= 2);
+    std::this_thread::sleep_for(std::chrono::milliseconds(2100));
+    assert(cache.ttl("expiring") == -2);
+    assert(pool.used_blocks() == 1);
+}
+
 static void testFilePersistence() {
     std::filesystem::path path = std::filesystem::temp_directory_path() /
         ("miniredis_unit_" + std::to_string(getpid()) + ".dat");
@@ -217,16 +236,39 @@ static void testClusterHashSlot() {
     assert(clusterHashKey("foo{}bar") == "foo{}bar");
 }
 
+static void testClusterSlotMap() {
+    ClusterSlotMap slot_map;
+    slot_map.Rebuild({"127.0.0.1:6366", "127.0.0.1:6367"});
+
+    assert(slot_map.GetNodeForSlot(0) == "127.0.0.1:6366");
+    assert(slot_map.GetNodeForSlot(8191) == "127.0.0.1:6366");
+    assert(slot_map.GetNodeForSlot(8192) == "127.0.0.1:6367");
+    assert(slot_map.GetNodeForSlot(16383) == "127.0.0.1:6367");
+
+    auto nodes = slot_map.GetAllNodes();
+    assert(nodes.size() == 2);
+    assert(nodes[0] == "127.0.0.1:6366");
+    assert(nodes[1] == "127.0.0.1:6367");
+
+    auto first_ranges = slot_map.GetSlotRangesForNode("127.0.0.1:6366");
+    auto second_ranges = slot_map.GetSlotRangesForNode("127.0.0.1:6367");
+    assert(first_ranges.size() == 1);
+    assert(first_ranges[0].start == 0);
+    assert(first_ranges[0].end == 8191);
+    assert(second_ranges.size() == 1);
+    assert(second_ranges[0].start == 8192);
+    assert(second_ranges[0].end == 16383);
+}
+
 static void testClusterCommands() {
     FixedMemoryPool pool(4);
     CacheStore cache(pool);
     AppConfig config;
-    ConsistentHash ring(8);
-    ring.AddNode("127.0.0.1:6366");
-    ring.AddNode("127.0.0.1:6367");
-    std::mutex ring_mutex;
+    ClusterSlotMap slot_map;
+    slot_map.Rebuild({"127.0.0.1:6366", "127.0.0.1:6367"});
+    std::mutex slot_map_mutex;
 
-    CommandHandler handler(cache, pool, config, true, "127.0.0.1:6366", &ring, &ring_mutex);
+    CommandHandler handler(cache, pool, config, true, "127.0.0.1:6366", &slot_map, &slot_map_mutex);
     bool authenticated = true;
 
     std::string keyslot = handler.handle(command({"CLUSTER", "KEYSLOT", "foo{bar}1"}), authenticated);
@@ -236,35 +278,47 @@ static void testClusterCommands() {
     assert(nodes.find("127.0.0.1:6366") != std::string::npos);
     assert(nodes.find("127.0.0.1:6367") != std::string::npos);
     assert(nodes.find("myself,master") != std::string::npos);
+    assert(nodes.find("0-8191") != std::string::npos);
+    assert(nodes.find("8192-16383") != std::string::npos);
 
     std::string info = handler.handle(command({"CLUSTER", "INFO"}), authenticated);
     assert(info.find("cluster_enabled:1") != std::string::npos);
     assert(info.find("cluster_known_nodes:2") != std::string::npos);
+
+    std::string slots = handler.handle(command({"CLUSTER", "SLOTS"}), authenticated);
+    RespDecoder decoder;
+    decoder.feed(slots);
+    auto parsed = decoder.parse();
+    assert(parsed.has_value());
+    assert(parsed->type == RespType::ARRAY);
+    assert(parsed->array.size() == 2);
+    assert(parsed->array[0].array[0].integer == 0);
+    assert(parsed->array[0].array[1].integer == 8191);
+    assert(parsed->array[0].array[2].array[0].str == "127.0.0.1");
+    assert(parsed->array[0].array[2].array[1].integer == 6366);
 }
 
 static void testMovedCountsAsCommand() {
     FixedMemoryPool pool(4);
     CacheStore cache(pool);
     AppConfig config;
-    ConsistentHash ring(8);
+    ClusterSlotMap slot_map;
     const std::string current_node = "127.0.0.1:6366";
     const std::string other_node = "127.0.0.1:6367";
-    ring.AddNode(current_node);
-    ring.AddNode(other_node);
-    std::mutex ring_mutex;
+    slot_map.Rebuild({current_node, other_node});
+    std::mutex slot_map_mutex;
 
     std::string moved_key;
     for (int i = 0; i < 1000; ++i) {
         std::string candidate = "moved-key-" + std::to_string(i);
-        std::string slot_key = std::to_string(clusterHashSlot(candidate));
-        if (ring.GetNode(slot_key) == other_node) {
+        if (slot_map.GetNodeForSlot(clusterHashSlot(candidate)) == other_node) {
             moved_key = candidate;
             break;
         }
     }
     assert(!moved_key.empty());
 
-    CommandHandler handler(cache, pool, config, true, current_node, &ring, &ring_mutex);
+    CommandHandler handler(cache, pool, config, true, current_node, &slot_map, &slot_map_mutex);
     bool authenticated = true;
     size_t before = Stats::instance().totalCommands();
     std::string response = handler.handle(command({"GET", moved_key}), authenticated);
@@ -279,20 +333,19 @@ static void testClusterRoutesBySlot() {
     FixedMemoryPool pool(4);
     CacheStore cache(pool);
     AppConfig config;
-    ConsistentHash ring(8);
-    ring.AddNode("127.0.0.1:6366");
-    ring.AddNode("127.0.0.1:6367");
-    std::mutex ring_mutex;
+    ClusterSlotMap slot_map;
+    slot_map.Rebuild({"127.0.0.1:6366", "127.0.0.1:6367"});
+    std::mutex slot_map_mutex;
 
     const std::string current_node = "127.0.0.1:9999";
     const std::string key_a = "user:{42}:name";
     const std::string key_b = "order:{42}:items";
     uint16_t slot = clusterHashSlot(key_a);
     assert(slot == clusterHashSlot(key_b));
-    std::string expected_target = ring.GetNode(std::to_string(slot));
+    std::string expected_target = slot_map.GetNodeForSlot(slot);
     assert(!expected_target.empty());
 
-    CommandHandler handler(cache, pool, config, true, current_node, &ring, &ring_mutex);
+    CommandHandler handler(cache, pool, config, true, current_node, &slot_map, &slot_map_mutex);
     bool authenticated = true;
     std::string response_a = handler.handle(command({"GET", key_a}), authenticated);
     std::string response_b = handler.handle(command({"GET", key_b}), authenticated);
@@ -326,6 +379,63 @@ static void testAuthFlow() {
            RespWriter::simpleString("PONG"));
 }
 
+static void testCommandSetExAndTtl() {
+    FixedMemoryPool pool(4);
+    CacheStore cache(pool);
+    AppConfig config;
+    CommandHandler handler(cache, pool, config, false, "127.0.0.1:6366", nullptr, nullptr);
+    bool authenticated = true;
+
+    assert(handler.handle(command({"TTL", "missing"}), authenticated) == ":-2\r\n");
+    assert(handler.handle(command({"SET", "session", "token", "EX", "2"}), authenticated) ==
+           RespWriter::simpleString("OK"));
+
+    std::string ttl_response = handler.handle(command({"TTL", "session"}), authenticated);
+    assert(ttl_response == ":1\r\n" || ttl_response == ":2\r\n");
+    assert(handler.handle(command({"GET", "session"}), authenticated) ==
+           RespWriter::bulkString("token"));
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(2100));
+    assert(handler.handle(command({"TTL", "session"}), authenticated) == ":-2\r\n");
+    assert(handler.handle(command({"GET", "session"}), authenticated) ==
+           RespWriter::nullBulkString());
+
+    assert(handler.handle(command({"SET", "bad", "value", "PX", "10"}), authenticated) ==
+           RespWriter::error("syntax error"));
+}
+
+static void testCommandExpireAndMget() {
+    FixedMemoryPool pool(8);
+    CacheStore cache(pool);
+    AppConfig config;
+    CommandHandler handler(cache, pool, config, false, "127.0.0.1:6366", nullptr, nullptr);
+    bool authenticated = true;
+
+    assert(handler.handle(command({"SET", "k1", "one"}), authenticated) ==
+           RespWriter::simpleString("OK"));
+    assert(handler.handle(command({"SET", "k2", "two"}), authenticated) ==
+           RespWriter::simpleString("OK"));
+
+    std::string mget_response = handler.handle(command({"MGET", "k1", "missing", "k2"}), authenticated);
+    RespDecoder decoder;
+    decoder.feed(mget_response);
+    auto parsed = decoder.parse();
+    assert(parsed.has_value());
+    assert(parsed->type == RespType::ARRAY);
+    assert(parsed->array.size() == 3);
+    assert(parsed->array[0].str == "one");
+    assert(parsed->array[1].type == RespType::BULK_STRING);
+    assert(parsed->array[1].str.empty());
+    assert(parsed->array[2].str == "two");
+
+    assert(handler.handle(command({"EXPIRE", "k1", "2"}), authenticated) == ":1\r\n");
+    std::string ttl_response = handler.handle(command({"TTL", "k1"}), authenticated);
+    assert(ttl_response == ":1\r\n" || ttl_response == ":2\r\n");
+    assert(handler.handle(command({"EXPIRE", "missing", "2"}), authenticated) == ":0\r\n");
+    assert(handler.handle(command({"EXPIRE", "k1", "0"}), authenticated) ==
+           RespWriter::error("invalid expire time"));
+}
+
 static void testCommandMetadata() {
     FixedMemoryPool pool(4);
     CacheStore cache(pool);
@@ -334,7 +444,7 @@ static void testCommandMetadata() {
     bool authenticated = true;
 
     std::string count_response = handler.handle(command({"COMMAND", "COUNT"}), authenticated);
-    assert(count_response == ":8\r\n");
+    assert(count_response == ":11\r\n");
 
     std::string table_response = handler.handle(command({"COMMAND"}), authenticated);
     RespDecoder decoder;
@@ -342,9 +452,12 @@ static void testCommandMetadata() {
     auto parsed = decoder.parse();
     assert(parsed.has_value());
     assert(parsed->type == RespType::ARRAY);
-    assert(parsed->array.size() == 8);
+    assert(parsed->array.size() == 11);
 
     bool saw_set = false;
+    bool saw_mget = false;
+    bool saw_expire = false;
+    bool saw_ttl = false;
     bool saw_cluster = false;
     for (const auto& entry : parsed->array) {
         assert(entry.type == RespType::ARRAY);
@@ -352,6 +465,24 @@ static void testCommandMetadata() {
         assert(entry.array[0].type == RespType::BULK_STRING);
         if (entry.array[0].str == "set") {
             saw_set = true;
+            assert(entry.array[1].integer == -3);
+            assert(entry.array[3].integer == 1);
+            assert(entry.array[4].integer == 1);
+        }
+        if (entry.array[0].str == "ttl") {
+            saw_ttl = true;
+            assert(entry.array[1].integer == 2);
+            assert(entry.array[3].integer == 1);
+            assert(entry.array[4].integer == 1);
+        }
+        if (entry.array[0].str == "mget") {
+            saw_mget = true;
+            assert(entry.array[1].integer == -2);
+            assert(entry.array[3].integer == 1);
+            assert(entry.array[4].integer == -1);
+        }
+        if (entry.array[0].str == "expire") {
+            saw_expire = true;
             assert(entry.array[1].integer == 3);
             assert(entry.array[3].integer == 1);
             assert(entry.array[4].integer == 1);
@@ -361,6 +492,9 @@ static void testCommandMetadata() {
         }
     }
     assert(saw_set);
+    assert(saw_mget);
+    assert(saw_expire);
+    assert(saw_ttl);
     assert(saw_cluster);
 }
 
@@ -373,13 +507,17 @@ int main() {
     testCacheStore();
     testCacheStoreLazyExpiration();
     testCacheStoreTtlCleanup();
+    testCacheStoreTtlQuery();
     testFilePersistence();
     testFilePersistenceRejectsHugeCount();
     testClusterHashSlot();
+    testClusterSlotMap();
     testClusterCommands();
     testMovedCountsAsCommand();
     testClusterRoutesBySlot();
     testAuthFlow();
+    testCommandSetExAndTtl();
+    testCommandExpireAndMget();
     testCommandMetadata();
     std::cout << "unit tests passed" << std::endl;
     return 0;

@@ -26,8 +26,10 @@ public:
     void setKeyCount(size_t count) { key_count_.store(count, std::memory_order_relaxed); }
     void setMemoryPoolUsed(size_t used_blocks, size_t free_blocks);
     size_t totalCommands() const { return total_commands_.load(std::memory_order_relaxed); }
+    size_t connectedClients() const { return connected_clients_.load(std::memory_order_relaxed); }
 
     std::string toJson() const;
+    std::string toPrometheus() const;
 
 private:
     Stats() = default;//单例，私有化

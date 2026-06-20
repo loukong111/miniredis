@@ -14,6 +14,7 @@ struct AppConfig {
     int snapshot_interval_sec = 20;
     std::string requirepass;
     size_t max_request_bytes = 16 * 1024 * 1024;
+    size_t max_clients = 10000;
 
     bool cluster_mode = false;
     bool enable_node_discovery = false;

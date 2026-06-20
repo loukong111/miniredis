@@ -21,6 +21,16 @@ int getEnvIntOr(const char* name, int fallback) {
     }
 }
 
+size_t getEnvSizeOr(const char* name, size_t fallback) {
+    const char* value = std::getenv(name);
+    if (!value) return fallback;
+    try {
+        return static_cast<size_t>(std::stoull(value));
+    } catch (...) {
+        return fallback;
+    }
+}
+
 void loadEnvironment(AppConfig& config) {
     config.bind_addr = getEnvOr("MINIREDIS_BIND", config.bind_addr);
     config.port = getEnvIntOr("MINIREDIS_PORT", config.port);
@@ -29,6 +39,7 @@ void loadEnvironment(AppConfig& config) {
     config.snapshot_file = getEnvOr("MINIREDIS_SNAPSHOT_FILE", config.snapshot_file);
     config.snapshot_interval_sec = getEnvIntOr("MINIREDIS_SNAPSHOT_INTERVAL", config.snapshot_interval_sec);
     config.requirepass = getEnvOr("MINIREDIS_REQUIREPASS", config.requirepass);
+    config.max_clients = getEnvSizeOr("MINIREDIS_MAX_CLIENTS", config.max_clients);
     config.mysql_host = getEnvOr("MINIREDIS_MYSQL_HOST", config.mysql_host);
     config.mysql_user = getEnvOr("MINIREDIS_MYSQL_USER", config.mysql_user);
     config.mysql_pass = getEnvOr("MINIREDIS_MYSQL_PASS", config.mysql_pass);
@@ -59,6 +70,7 @@ void printUsage(const char* program) {
         << "  --snapshot-file path      Snapshot file path\n"
         << "  --snapshot-interval sec   Snapshot interval (default: 20)\n"
         << "  --requirepass password    Enable AUTH with this password\n"
+        << "  --max-clients count       Maximum concurrent RESP clients (default: 10000)\n"
         << "  --cluster                 Enable experimental cluster routing\n"
         << "  --enable-node-discovery   Enable MySQL-backed cluster node discovery\n"
         << "  --node-addr ip:port       Current cluster node address\n"
@@ -85,6 +97,7 @@ ConfigParseResult parseConfig(int argc, char* argv[], AppConfig& config) {
         {"snapshot-file",     required_argument, 0, 's'},
         {"snapshot-interval", required_argument, 0, 'i'},
         {"requirepass",       required_argument, 0, 'r'},
+        {"max-clients",       required_argument, 0, 1008},
         {"mysql-host",        required_argument, 0, 1002},
         {"mysql-user",        required_argument, 0, 1003},
         {"mysql-pass",        required_argument, 0, 1004},
@@ -108,6 +121,7 @@ ConfigParseResult parseConfig(int argc, char* argv[], AppConfig& config) {
                 case 's': config.snapshot_file = optarg; break;
                 case 'i': config.snapshot_interval_sec = std::stoi(optarg); break;
                 case 'r': config.requirepass = optarg; break;
+                case 1008: config.max_clients = static_cast<size_t>(std::stoull(optarg)); break;
                 case 1000: config.stats_bind_addr = optarg; break;
                 case 1001: config.stats_port = std::stoi(optarg); break;
                 case 1002: config.mysql_host = optarg; break;
@@ -136,6 +150,10 @@ ConfigParseResult parseConfig(int argc, char* argv[], AppConfig& config) {
     }
     if (config.snapshot_interval_sec <= 0) {
         std::cerr << "snapshot interval must be positive" << std::endl;
+        return ConfigParseResult::Error;
+    }
+    if (config.max_clients == 0) {
+        std::cerr << "max clients must be positive" << std::endl;
         return ConfigParseResult::Error;
     }
     return ConfigParseResult::Ok;

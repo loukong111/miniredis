@@ -1,0 +1,8 @@
+{
+	"InstallScripts" : 
+	[
+		"/home/wcl/miniredis/build-qt/cmake_install.cmake",
+		"/home/wcl/miniredis/build-qt/tools/qt_console/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

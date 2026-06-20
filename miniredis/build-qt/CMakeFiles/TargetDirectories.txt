@@ -1,0 +1,11 @@
+/home/wcl/miniredis/build-qt/CMakeFiles/miniredis.dir
+/home/wcl/miniredis/build-qt/CMakeFiles/miniredis_unit_tests.dir
+/home/wcl/miniredis/build-qt/CMakeFiles/test.dir
+/home/wcl/miniredis/build-qt/CMakeFiles/edit_cache.dir
+/home/wcl/miniredis/build-qt/CMakeFiles/rebuild_cache.dir
+/home/wcl/miniredis/build-qt/tools/qt_console/CMakeFiles/miniredis_qt_console.dir
+/home/wcl/miniredis/build-qt/tools/qt_console/CMakeFiles/test.dir
+/home/wcl/miniredis/build-qt/tools/qt_console/CMakeFiles/edit_cache.dir
+/home/wcl/miniredis/build-qt/tools/qt_console/CMakeFiles/rebuild_cache.dir
+/home/wcl/miniredis/build-qt/tools/qt_console/CMakeFiles/miniredis_qt_console_autogen_timestamp_deps.dir
+/home/wcl/miniredis/build-qt/tools/qt_console/CMakeFiles/miniredis_qt_console_autogen.dir

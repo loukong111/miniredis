@@ -84,21 +84,42 @@ run_auth_kv_stats_snapshot_smoke() {
   assert_eq "$("${REDIS_CLI}" -p "${port}" -a secret --raw SET alpha one 2>/dev/null)" "OK" "set alpha"
   assert_eq "$("${REDIS_CLI}" -p "${port}" -a secret --raw SET spaced "hello world" 2>/dev/null)" "OK" "set spaced"
   assert_eq "$("${REDIS_CLI}" -p "${port}" -a secret --raw GET alpha 2>/dev/null)" "one" "get alpha"
+  assert_eq "$("${REDIS_CLI}" -p "${port}" -a secret --raw MGET alpha missing spaced 2>/dev/null)" $'one\n\nhello world' "mget mixed"
+  assert_eq "$("${REDIS_CLI}" -p "${port}" -a secret --raw TTL alpha 2>/dev/null)" "-1" "ttl persistent alpha"
+  assert_eq "$("${REDIS_CLI}" -p "${port}" -a secret --raw EXPIRE alpha 10 2>/dev/null)" "1" "expire alpha"
+  local alpha_ttl
+  alpha_ttl="$("${REDIS_CLI}" -p "${port}" -a secret --raw TTL alpha 2>/dev/null)"
+  if [[ "${alpha_ttl}" -lt 1 || "${alpha_ttl}" -gt 10 ]]; then
+    echo "assertion failed for alpha ttl: expected 1..10, got '${alpha_ttl}'" >&2
+    exit 1
+  fi
+  assert_eq "$("${REDIS_CLI}" -p "${port}" -a secret --raw SET transient value EX 10 2>/dev/null)" "OK" "set transient ex"
+  local transient_ttl
+  transient_ttl="$("${REDIS_CLI}" -p "${port}" -a secret --raw TTL transient 2>/dev/null)"
+  if [[ "${transient_ttl}" -lt 1 || "${transient_ttl}" -gt 10 ]]; then
+    echo "assertion failed for transient ttl: expected 1..10, got '${transient_ttl}'" >&2
+    exit 1
+  fi
+  assert_eq "$("${REDIS_CLI}" -p "${port}" -a secret --raw DEL transient 2>/dev/null)" "1" "del transient"
   assert_eq "$("${REDIS_CLI}" -p "${port}" -a secret --raw EXISTS alpha 2>/dev/null)" "1" "exists alpha"
   assert_eq "$("${REDIS_CLI}" -p "${port}" -a secret --raw DEL alpha 2>/dev/null)" "1" "del alpha"
   assert_eq "$("${REDIS_CLI}" -p "${port}" -a secret --raw EXISTS alpha 2>/dev/null)" "0" "exists deleted alpha"
-  assert_eq "$("${REDIS_CLI}" -p "${port}" -a secret --raw COMMAND COUNT 2>/dev/null)" "8" "command count"
+  assert_eq "$("${REDIS_CLI}" -p "${port}" -a secret --raw COMMAND COUNT 2>/dev/null)" "11" "command count"
 
-  local stats
+  local stats metrics
   stats="$("${CURL}" -fsS "http://127.0.0.1:${stats_port}/stats")"
   grep -q '"key_count":1' <<<"${stats}"
   grep -q '"mem_pool_used_blocks":1' <<<"${stats}"
   grep -q '"connected_clients":0' <<<"${stats}"
   grep -q '"total_connections":' <<<"${stats}"
   grep -q '"rejected_connections":0' <<<"${stats}"
+  grep -q '"hit_rate":' <<<"${stats}"
   grep -q '"latency_samples":' <<<"${stats}"
   grep -q '"avg_command_latency_us":' <<<"${stats}"
   grep -q '"max_command_latency_us":' <<<"${stats}"
+  metrics="$("${CURL}" -fsS "http://127.0.0.1:${stats_port}/metrics")"
+  grep -q 'miniredis_total_commands' <<<"${metrics}"
+  grep -q 'miniredis_hit_rate' <<<"${metrics}"
 
   stop_server
 
@@ -134,7 +155,7 @@ run_cluster_smoke() {
   PID="$!"
   wait_for_plain_server "${port}"
 
-  local info nodes keyslot
+  local info nodes keyslot slots
   info="$("${REDIS_CLI}" -p "${port}" --raw CLUSTER INFO)"
   grep -q 'cluster_enabled:1' <<<"${info}"
   grep -q 'cluster_known_nodes:1' <<<"${info}"
@@ -142,9 +163,14 @@ run_cluster_smoke() {
   nodes="$("${REDIS_CLI}" -p "${port}" --raw CLUSTER NODES)"
   grep -q "127.0.0.1:${port}" <<<"${nodes}"
   grep -q 'myself,master' <<<"${nodes}"
+  grep -q '0-16383' <<<"${nodes}"
 
   keyslot="$("${REDIS_CLI}" -p "${port}" --raw CLUSTER KEYSLOT 'foo{bar}1')"
   assert_eq "${keyslot}" "5061" "cluster keyslot"
+
+  slots="$("${REDIS_CLI}" -p "${port}" --raw CLUSTER SLOTS)"
+  grep -q '127.0.0.1' <<<"${slots}"
+  grep -q "${port}" <<<"${slots}"
 
   assert_eq "$("${REDIS_CLI}" -p "${port}" --raw SET cluster_probe ok)" "OK" "cluster set"
   assert_eq "$("${REDIS_CLI}" -p "${port}" --raw GET cluster_probe)" "ok" "cluster get"

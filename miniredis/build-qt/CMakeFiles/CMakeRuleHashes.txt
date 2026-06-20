@@ -1,0 +1,3 @@
+# Hashes of file build rules.
+75fd5ab6bf0ba7858c5d1ccc2eba1f8a tools/qt_console/CMakeFiles/miniredis_qt_console_autogen
+ec5b7744dd922bf7be99f12759b7d87b tools/qt_console/miniredis_qt_console_autogen/timestamp

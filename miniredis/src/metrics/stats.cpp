@@ -78,6 +78,10 @@ std::string Stats::getNodeAddr() const {
 std::string Stats::toJson() const {
     std::string node_addr = getNodeAddr();
     size_t latency_samples = latency_samples_.load(std::memory_order_relaxed);
+    size_t get_hits = get_hits_.load(std::memory_order_relaxed);
+    size_t get_misses = get_misses_.load(std::memory_order_relaxed);
+    size_t total_gets = get_hits + get_misses;
+    double hit_rate = total_gets == 0 ? 0.0 : static_cast<double>(get_hits) / total_gets;
     size_t avg_latency_us = 0;
     if (latency_samples > 0) {
         avg_latency_us = total_command_latency_us_.load(std::memory_order_relaxed) / latency_samples;
@@ -86,8 +90,9 @@ std::string Stats::toJson() const {
     oss << "{";
     oss << "\"node_addr\":\"" << node_addr << "\",";
     oss << "\"total_commands\":" << total_commands_.load() << ",";
-    oss << "\"get_hits\":" << get_hits_.load() << ",";
-    oss << "\"get_misses\":" << get_misses_.load() << ",";
+    oss << "\"get_hits\":" << get_hits << ",";
+    oss << "\"get_misses\":" << get_misses << ",";
+    oss << "\"hit_rate\":" << std::fixed << std::setprecision(4) << hit_rate << ",";
     oss << "\"key_count\":" << key_count_.load() << ",";
     oss << "\"mem_pool_used_blocks\":" << mem_pool_used_.load() << ",";
     oss << "\"mem_pool_free_blocks\":" << mem_pool_free_.load() << ",";
@@ -98,6 +103,48 @@ std::string Stats::toJson() const {
     oss << "\"avg_command_latency_us\":" << avg_latency_us << ",";
     oss << "\"max_command_latency_us\":" << max_command_latency_us_.load();
     oss << "}";
+    return oss.str();
+}
+
+std::string Stats::toPrometheus() const {
+    size_t latency_samples = latency_samples_.load(std::memory_order_relaxed);
+    size_t get_hits = get_hits_.load(std::memory_order_relaxed);
+    size_t get_misses = get_misses_.load(std::memory_order_relaxed);
+    size_t total_gets = get_hits + get_misses;
+    double hit_rate = total_gets == 0 ? 0.0 : static_cast<double>(get_hits) / total_gets;
+    size_t avg_latency_us = 0;
+    if (latency_samples > 0) {
+        avg_latency_us = total_command_latency_us_.load(std::memory_order_relaxed) / latency_samples;
+    }
+
+    std::ostringstream oss;
+    oss << "# HELP miniredis_total_commands Total processed commands.\n";
+    oss << "# TYPE miniredis_total_commands counter\n";
+    oss << "miniredis_total_commands " << total_commands_.load() << "\n";
+    oss << "# TYPE miniredis_get_hits counter\n";
+    oss << "miniredis_get_hits " << get_hits << "\n";
+    oss << "# TYPE miniredis_get_misses counter\n";
+    oss << "miniredis_get_misses " << get_misses << "\n";
+    oss << "# TYPE miniredis_hit_rate gauge\n";
+    oss << "miniredis_hit_rate " << std::fixed << std::setprecision(4) << hit_rate << "\n";
+    oss << "# TYPE miniredis_key_count gauge\n";
+    oss << "miniredis_key_count " << key_count_.load() << "\n";
+    oss << "# TYPE miniredis_mem_pool_used_blocks gauge\n";
+    oss << "miniredis_mem_pool_used_blocks " << mem_pool_used_.load() << "\n";
+    oss << "# TYPE miniredis_mem_pool_free_blocks gauge\n";
+    oss << "miniredis_mem_pool_free_blocks " << mem_pool_free_.load() << "\n";
+    oss << "# TYPE miniredis_connected_clients gauge\n";
+    oss << "miniredis_connected_clients " << connected_clients_.load() << "\n";
+    oss << "# TYPE miniredis_total_connections counter\n";
+    oss << "miniredis_total_connections " << total_connections_.load() << "\n";
+    oss << "# TYPE miniredis_rejected_connections counter\n";
+    oss << "miniredis_rejected_connections " << rejected_connections_.load() << "\n";
+    oss << "# TYPE miniredis_latency_samples counter\n";
+    oss << "miniredis_latency_samples " << latency_samples << "\n";
+    oss << "# TYPE miniredis_avg_command_latency_us gauge\n";
+    oss << "miniredis_avg_command_latency_us " << avg_latency_us << "\n";
+    oss << "# TYPE miniredis_max_command_latency_us gauge\n";
+    oss << "miniredis_max_command_latency_us " << max_command_latency_us_.load() << "\n";
     return oss.str();
 }
 

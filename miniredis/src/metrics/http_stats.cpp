@@ -101,6 +101,10 @@ static void handle_client(int client_fd) {
         std::string body = Stats::instance().toJson();
         std::string response = make_response("200 OK", "application/json", body);
         write_all(client_fd, response);
+    } else if (request_line_matches(request, "GET", "/metrics")) {
+        std::string body = Stats::instance().toPrometheus();
+        std::string response = make_response("200 OK", "text/plain; version=0.0.4", body);
+        write_all(client_fd, response);
     } else {
         const std::string response = make_response("404 Not Found", "text/plain", "not found\n");
         write_all(client_fd, response);

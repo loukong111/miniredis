@@ -97,6 +97,39 @@ bool CacheStore::exists(const std::string& key) {
     return false;
 }
 
+bool CacheStore::expire(const std::string& key, int ttl_seconds) {
+    std::unique_lock lock(mtx_);
+    auto it = store_.find(key);
+    if (it == store_.end()) return false;
+    if (it->second.is_expired()) {
+        it->second.release(pool_);
+        store_.erase(it);
+        return false;
+    }
+    it->second.expire_time = std::chrono::steady_clock::now() + std::chrono::seconds(ttl_seconds);
+    return true;
+}
+
+long long CacheStore::ttl(const std::string& key) {
+    {
+        std::shared_lock lock(mtx_);
+        auto it = store_.find(key);
+        if (it == store_.end()) return -2;
+        if (it->second.is_expired()) {
+            // Fall through to lazy deletion below.
+        } else if (it->second.expire_time == std::chrono::steady_clock::time_point{}) {
+            return -1;
+        } else {
+            auto remaining = it->second.expire_time - std::chrono::steady_clock::now();
+            auto remaining_ms = std::chrono::duration_cast<std::chrono::milliseconds>(remaining).count();
+            if (remaining_ms <= 0) return 0;
+            return (remaining_ms + 999) / 1000;
+        }
+    }
+    erase_if_expired(key);
+    return -2;
+}
+
 bool CacheStore::erase_if_expired(const std::string& key) {
     std::unique_lock lock(mtx_);
     auto it = store_.find(key);

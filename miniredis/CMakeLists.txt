@@ -7,6 +7,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 # 项目通过 option 控制测试维度，实现“开发构建”和“CI 构建”分离。
 option(MINIREDIS_ENABLE_INTEGRATION_TESTS "Enable redis-cli/curl based integration tests" ON)
+option(MINIREDIS_BUILD_QT_CONSOLE "Build the optional Qt demo console" OFF)
 
 find_library(MYSQL_CLIENT_LIB mysqlclient)
 if(MYSQL_CLIENT_LIB)
@@ -26,7 +27,7 @@ set(MINIREDIS_LIB_SOURCES
     ${CMAKE_SOURCE_DIR}/src/net/scheduler.cpp
     ${CMAKE_SOURCE_DIR}/src/net/resp_parser.cpp
     ${CMAKE_SOURCE_DIR}/src/persistence/persistence_manager.cpp
-    ${CMAKE_SOURCE_DIR}/src/cluster/consistent_hash.cpp
+    ${CMAKE_SOURCE_DIR}/src/cluster/slot_map.cpp
     ${CMAKE_SOURCE_DIR}/src/cluster/cluster_utils.cpp
     ${CMAKE_SOURCE_DIR}/src/metrics/stats.cpp
     ${CMAKE_SOURCE_DIR}/src/metrics/http_stats.cpp
@@ -54,10 +55,8 @@ if(HAVE_MYSQL)
     target_compile_definitions(miniredis PUBLIC HAVE_MYSQL)
 endif()
 
-if(BUILD_MONITOR)
-    add_executable(miniredis_monitor ${CMAKE_SOURCE_DIR}/src/monitor.cpp)
-    target_link_libraries(miniredis_monitor Qt6::Core Qt6::Widgets)
-    target_compile_definitions(miniredis_monitor PUBLIC BUILD_MONITOR)
+if(MINIREDIS_BUILD_QT_CONSOLE)
+    add_subdirectory(tools/qt_console)
 endif()
 
 enable_testing()
@@ -69,7 +68,7 @@ add_executable(miniredis_unit_tests
     ${CMAKE_SOURCE_DIR}/src/core/memory_pool.cpp
     ${CMAKE_SOURCE_DIR}/src/core/thread_pool.cpp
     ${CMAKE_SOURCE_DIR}/src/net/resp_parser.cpp
-    ${CMAKE_SOURCE_DIR}/src/cluster/consistent_hash.cpp
+    ${CMAKE_SOURCE_DIR}/src/cluster/slot_map.cpp
     ${CMAKE_SOURCE_DIR}/src/cluster/cluster_utils.cpp
     ${CMAKE_SOURCE_DIR}/src/metrics/stats.cpp
     ${CMAKE_SOURCE_DIR}/src/server/command_handler.cpp

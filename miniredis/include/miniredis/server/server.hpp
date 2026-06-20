@@ -1,6 +1,6 @@
 #pragma once
 
-#include "miniredis/cluster/consistent_hash.hpp"
+#include "miniredis/cluster/slot_map.hpp"
 #include "miniredis/core/cache_store.hpp"
 #include "miniredis/core/memory_pool.hpp"
 #include "miniredis/core/thread_pool.hpp"
@@ -46,11 +46,11 @@ private:
     int listen_fd_;
 
     std::string current_node_;
-    std::unique_ptr<ConsistentHash> hash_ring_;
+    std::unique_ptr<ClusterSlotMap> slot_map_;
 #ifdef HAVE_MYSQL
     std::unique_ptr<MySQLClient> mysql_;
 #endif
-    std::mutex hash_ring_mutex_;
+    std::mutex slot_map_mutex_;
 
     std::thread stats_thread_;
     std::thread scheduler_thread_;

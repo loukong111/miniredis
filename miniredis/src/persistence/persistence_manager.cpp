@@ -1,4 +1,6 @@
 #include "miniredis/persistence/persistence_manager.hpp"
+#include <chrono>
+#include <exception>
 #include <iostream>
 
 namespace miniredis {
@@ -6,7 +8,7 @@ namespace miniredis {
 PersistenceManager::PersistenceManager(CacheStore& cache, const std::string& snapshot_file,
                                        DynamicThreadPool& pool, int interval_sec)
     : cache_(cache), file_persistence_(snapshot_file), pool_(pool),
-      snapshot_interval_sec_(interval_sec), running_(false) {}
+      snapshot_interval_sec_(interval_sec), running_(false), snapshot_running_(false) {}
 
 PersistenceManager::~PersistenceManager() { stop(); }
 
@@ -23,6 +25,9 @@ void PersistenceManager::stop() {
     running_ = false;
     cv_.notify_all();
     if (worker_.joinable()) worker_.join();
+    while (snapshot_running_.load()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
     takeSnapshot(); 
 }
 
@@ -36,9 +41,29 @@ void PersistenceManager::workerLoop() {
         });
         if (!running_) break;
         lock.unlock();
-        //必须future阻塞等待，因为如果前一次保存很慢，用了20+秒。这样下一个快照任务会写入同一个snapshot文件
-        auto future = pool_.submit([this]() { this->saveSnapshotToFile(); });
-        future.get();//等待保存
+        submitSnapshotIfIdle();
+    }
+}
+
+void PersistenceManager::submitSnapshotIfIdle() {
+    bool expected = false;
+    if (!snapshot_running_.compare_exchange_strong(expected, true)) {
+        return;
+    }
+    try {
+        pool_.submit([this]() {
+            try {
+                this->saveSnapshotToFile();
+            } catch (const std::exception& e) {
+                std::cerr << "[Persistence] Snapshot task failed: " << e.what() << std::endl;
+            } catch (...) {
+                std::cerr << "[Persistence] Snapshot task failed with unknown error" << std::endl;
+            }
+            snapshot_running_.store(false);
+        });
+    } catch (const std::exception& e) {
+        snapshot_running_.store(false);
+        std::cerr << "[Persistence] Failed to submit snapshot task: " << e.what() << std::endl;
     }
 }
 

@@ -38,6 +38,8 @@ public:
     std::optional<std::string> get(const std::string& key);
     bool del(const std::string& key);
     bool exists(const std::string& key);
+    bool expire(const std::string& key, int ttl_seconds);
+    long long ttl(const std::string& key);
     size_t cleanup();   // 清理过期条目，释放内存池内存
 
     std::unordered_map<std::string, std::string> snapshot() const;

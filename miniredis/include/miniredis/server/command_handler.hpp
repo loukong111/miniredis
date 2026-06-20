@@ -1,6 +1,6 @@
 #pragma once
 
-#include "miniredis/cluster/consistent_hash.hpp"
+#include "miniredis/cluster/slot_map.hpp"
 #include "miniredis/core/cache_store.hpp"
 #include "miniredis/core/memory_pool.hpp"
 #include "miniredis/net/resp_parser.hpp"
@@ -15,7 +15,7 @@ class CommandHandler {
 public:
     CommandHandler(CacheStore& cache, FixedMemoryPool& memory_pool, const AppConfig& config,
                    bool cluster_mode, std::string current_node,
-                   ConsistentHash* hash_ring, std::mutex* hash_ring_mutex);
+                   ClusterSlotMap* slot_map, std::mutex* slot_map_mutex);
 
     std::string handle(const RespValue& cmd, bool& authenticated);
     void refreshRuntimeStats() const;
@@ -30,8 +30,8 @@ private:
     const AppConfig& config_;
     bool cluster_mode_;
     std::string current_node_;
-    ConsistentHash* hash_ring_;
-    std::mutex* hash_ring_mutex_;
+    ClusterSlotMap* slot_map_;
+    std::mutex* slot_map_mutex_;
 };
 
 } // namespace miniredis

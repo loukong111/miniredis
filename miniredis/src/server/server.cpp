@@ -34,6 +34,20 @@ bool setNonBlocking(int fd) {
     return fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0;
 }
 
+std::vector<std::string> parseClusterNodes(const std::string& nodes_str) {
+    std::vector<std::string> nodes;
+    size_t start = 0;
+    size_t end = 0;
+    while ((end = nodes_str.find(',', start)) != std::string::npos) {
+        std::string node = nodes_str.substr(start, end - start);
+        if (!node.empty()) nodes.push_back(node);
+        start = end + 1;
+    }
+    std::string last = nodes_str.substr(start);
+    if (!last.empty()) nodes.push_back(last);
+    return nodes;
+}
+
 class ClientConnection {
 public:
     ClientConnection(Scheduler& scheduler, int fd) : scheduler_(scheduler), fd_(fd) {}
@@ -124,7 +138,6 @@ Task handleClient(Scheduler& scheduler, CommandHandler& command_handler,
 
 Task acceptLoop(Scheduler& scheduler, CommandHandler& command_handler,
                 const AppConfig& config, std::atomic<bool>& running, int listen_fd) {
-    std::vector<Task> client_tasks;
     while (running.load()) {
         co_await scheduler.await_io(listen_fd, EPOLLIN);
         while (true) {
@@ -141,13 +154,16 @@ Task acceptLoop(Scheduler& scheduler, CommandHandler& command_handler,
                 close(client_fd);
                 continue;
             }
+            if (Stats::instance().connectedClients() >= config.max_clients) {
+                Stats::instance().recordRejectedConnection();
+                const char* error = "-ERR max number of clients reached\r\n";
+                ssize_t ignored = write(client_fd, error, std::strlen(error));
+                (void)ignored;
+                close(client_fd);
+                continue;
+            }
             Stats::instance().recordConnectionOpen();
-            client_tasks.push_back(handleClient(scheduler, command_handler, config, client_fd));
-        }
-
-        for (auto it = client_tasks.begin(); it != client_tasks.end(); ) {
-            if (it->done()) it = client_tasks.erase(it);
-            else ++it;
+            scheduler.schedule_task(handleClient(scheduler, command_handler, config, client_fd));
         }
     }
 }
@@ -179,16 +195,13 @@ bool MiniRedisServer::configureCluster() {
             return false;
         }
 
-        hash_ring_ = std::make_unique<ConsistentHash>(150);
-        size_t start = 0;
-        size_t end = 0;
-        while ((end = config_.nodes_str.find(',', start)) != std::string::npos) {
-            std::string node = config_.nodes_str.substr(start, end - start);
-            if (!node.empty()) hash_ring_->AddNode(node);
-            start = end + 1;
+        auto nodes = parseClusterNodes(config_.nodes_str);
+        if (nodes.empty()) {
+            std::cerr << "Cluster mode requires at least one node in --nodes" << std::endl;
+            return false;
         }
-        std::string last = config_.nodes_str.substr(start);
-        if (!last.empty()) hash_ring_->AddNode(last);
+        slot_map_ = std::make_unique<ClusterSlotMap>();
+        slot_map_->Rebuild(nodes);
     } else {
         std::ostringstream node;
         node << config_.bind_addr << ":" << config_.port;
@@ -273,11 +286,8 @@ void MiniRedisServer::startClusterDiscovery() {
 
             auto nodes = mysql_->getActiveNodes(30);
             if (!nodes.empty()) {
-                std::lock_guard<std::mutex> lock(hash_ring_mutex_);
-                hash_ring_->clear();
-                for (const auto& node : nodes) {
-                    hash_ring_->AddNode(node);
-                }
+                std::lock_guard<std::mutex> lock(slot_map_mutex_);
+                slot_map_->Rebuild(nodes);
             }
         }
     });
@@ -310,11 +320,10 @@ int MiniRedisServer::run() {
     persistence.start();
 
     CommandHandler command_handler(cache_, memory_pool_, config_, config_.cluster_mode,
-                                   current_node_, hash_ring_.get(), &hash_ring_mutex_);
+                                   current_node_, slot_map_.get(), &slot_map_mutex_);
     command_handler.refreshRuntimeStats();
 
-    auto acceptor = acceptLoop(scheduler_, command_handler, config_, running_, listen_fd_);
-    acceptor.resume();
+    scheduler_.schedule_task(acceptLoop(scheduler_, command_handler, config_, running_, listen_fd_));
     scheduler_thread_ = std::thread([this]() { scheduler_.start(); });
 
     while (running_.load()) {
