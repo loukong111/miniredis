@@ -3,6 +3,7 @@
 #include <QObject>
 #include <QNetworkAccessManager>
 #include <QJsonObject>
+#include <QString>
 
 class StatsClient : public QObject {
     Q_OBJECT

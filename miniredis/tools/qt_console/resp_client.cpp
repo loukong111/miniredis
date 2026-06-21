@@ -2,6 +2,20 @@
 
 #include <QHostAddress>
 
+namespace {
+
+QString quoteBulkString(QString value) {
+    value.replace('\\', "\\\\");
+    value.replace('"', "\\\"");
+    return "\"" + value + "\"";
+}
+
+QString indentForDepth(int depth) {
+    return QString(depth * 3, ' ');
+}
+
+}  // namespace
+
 RespClient::RespClient(QObject* parent) : QObject(parent) {
     connect(&socket_, &QTcpSocket::connected, this, &RespClient::connected);
     connect(&socket_, &QTcpSocket::disconnected, this, &RespClient::disconnected);
@@ -81,7 +95,7 @@ QString RespClient::parseLineValue(int& pos, QChar prefix, const QString& label,
     return label.isEmpty() ? value : label + value;
 }
 
-QString RespClient::parseValue(int& pos, bool& ok) const {
+QString RespClient::parseValue(int& pos, bool& ok, int depth, bool in_array) const {
     if (pos >= buffer_.size()) {
         ok = false;
         return {};
@@ -90,7 +104,7 @@ QString RespClient::parseValue(int& pos, bool& ok) const {
     char type = buffer_[pos];
     if (type == '+') return parseLineValue(pos, '+', "", ok);
     if (type == '-') return parseLineValue(pos, '-', "ERR ", ok);
-    if (type == ':') return parseLineValue(pos, ':', "", ok);
+    if (type == ':') return parseLineValue(pos, ':', "(integer) ", ok);
 
     if (type == '$') {
         int len_end = buffer_.indexOf("\r\n", pos);
@@ -112,7 +126,7 @@ QString RespClient::parseValue(int& pos, bool& ok) const {
         }
         QString value = QString::fromUtf8(buffer_.mid(pos, len));
         pos += len + 2;
-        return value;
+        return in_array ? quoteBulkString(value) : value;
     }
 
     if (type == '*') {
@@ -128,11 +142,19 @@ QString RespClient::parseValue(int& pos, bool& ok) const {
             return {};
         }
         pos = count_end + 2;
+        if (count == 0) return "(empty array)";
+
         QStringList items;
         for (int i = 0; i < count; ++i) {
-            QString item = parseValue(pos, ok);
+            QString item = parseValue(pos, ok, depth + 1, true);
             if (!ok) return {};
-            items << QString("%1) %2").arg(i + 1).arg(item);
+
+            QStringList lines = item.split('\n');
+            QString first = lines.takeFirst().trimmed();
+            items << QString("%1%2) %3").arg(indentForDepth(depth)).arg(i + 1).arg(first);
+            for (const QString& line : lines) {
+                items << line;
+            }
         }
         return items.join('\n');
     }

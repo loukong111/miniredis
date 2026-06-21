@@ -185,7 +185,12 @@ QWidget* MonitorWindow::buildClusterTab() {
     connect(nodes_btn, &QPushButton::clicked, this, [this]() { sendCommand({"CLUSTER", "NODES"}); });
     connect(slots_btn, &QPushButton::clicked, this, [this]() { sendCommand({"CLUSTER", "SLOTS"}); });
     connect(keyslot_btn, &QPushButton::clicked, this, [this, key_edit]() {
-        sendCommand({"CLUSTER", "KEYSLOT", key_edit->text()});
+        QString key = key_edit->text();
+        if (key.isEmpty()) {
+            appendLog("ERR key is required for CLUSTER KEYSLOT");
+            return;
+        }
+        sendCommand({"CLUSTER", "KEYSLOT", key});
     });
 
     return page;
@@ -238,7 +243,6 @@ void MonitorWindow::sendCommand(const QStringList& parts) {
     if (parts.isEmpty()) return;
     QString rendered = "> " + parts.join(' ');
     appendLog(rendered);
-    if (tabs_->currentIndex() == 1) cluster_output_->appendPlainText(rendered);
     resp_client_.sendCommand(parts);
 }
 

@@ -11,6 +11,8 @@ CLIENTS="${CLIENTS:-50}"
 VALUE_SIZES="${VALUE_SIZES:-64 1024 10240}"
 OUT="${OUT:-build/benchmark-report.txt}"
 SUMMARY_OUT="${SUMMARY_OUT:-build/benchmark-summary.md}"
+RAW_OUT="${RAW_OUT:-build/benchmark-raw.txt}"
+SAVE_RAW="${SAVE_RAW:-0}"
 TMPDIR="$(mktemp -d /tmp/miniredis_bench.XXXXXX)"
 PID=""
 
@@ -34,7 +36,7 @@ wait_ready() {
   exit 1
 }
 
-mkdir -p "$(dirname "${OUT}")"
+mkdir -p "$(dirname "${OUT}")" "$(dirname "${SUMMARY_OUT}")" "$(dirname "${RAW_OUT}")"
 
 "${SERVER}" \
   --bind 127.0.0.1 \
@@ -52,7 +54,10 @@ wait_ready
   echo "server: ${SERVER}"
   echo "requests: ${REQUESTS}"
   echo "clients: ${CLIENTS}"
+  echo "value_sizes: ${VALUE_SIZES}"
   echo
+  echo "| value_size_bytes | command | requests/sec | p50 ms | p95 ms | p99 ms | max ms |"
+  echo "| ---: | :--- | ---: | ---: | ---: | ---: | ---: |"
 } >"${OUT}"
 
 {
@@ -60,13 +65,30 @@ wait_ready
   echo "| ---: | :--- | ---: | ---: | ---: | ---: | ---: |"
 } >"${SUMMARY_OUT}"
 
+if [[ "${SAVE_RAW}" == "1" ]]; then
+  {
+    echo "MiniRedis raw benchmark"
+    echo "date: $(date -Iseconds)"
+    echo "server: ${SERVER}"
+    echo "requests: ${REQUESTS}"
+    echo "clients: ${CLIENTS}"
+    echo "value_sizes: ${VALUE_SIZES}"
+    echo
+  } >"${RAW_OUT}"
+fi
+
 for size in ${VALUE_SIZES}; do
   result_file="${TMPDIR}/benchmark_${size}.txt"
-  {
-    echo "value_size_bytes: ${size}"
-    "${REDIS_BENCHMARK}" -p "${PORT}" -n "${REQUESTS}" -c "${CLIENTS}" -d "${size}" -t set,get
-    echo
-  } | tee "${result_file}" | tee -a "${OUT}"
+  echo "running redis-benchmark with ${size}B values..."
+  "${REDIS_BENCHMARK}" -p "${PORT}" -n "${REQUESTS}" -c "${CLIENTS}" -d "${size}" -t set,get >"${result_file}"
+
+  if [[ "${SAVE_RAW}" == "1" ]]; then
+    {
+      echo "value_size_bytes: ${size}"
+      cat "${result_file}"
+      echo
+    } >>"${RAW_OUT}"
+  fi
 
   awk -v size="${size}" '
     /======[[:space:]]+(SET|GET)[[:space:]]+======/ {
@@ -81,8 +103,13 @@ for size in ${VALUE_SIZES}; do
              size, cmd, throughput, $3, $4, $5, $6);
       want=0
     }
-  ' "${result_file}" >>"${SUMMARY_OUT}"
+  ' "${result_file}" | tee -a "${SUMMARY_OUT}" >>"${OUT}"
 done
 
 echo "benchmark report written to ${OUT}"
 echo "benchmark summary written to ${SUMMARY_OUT}"
+if [[ "${SAVE_RAW}" == "1" ]]; then
+  echo "raw benchmark log written to ${RAW_OUT}"
+else
+  echo "set SAVE_RAW=1 to also write the full redis-benchmark log to ${RAW_OUT}"
+fi

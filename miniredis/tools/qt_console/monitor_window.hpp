@@ -6,6 +6,8 @@
 #include <QJsonObject>
 #include <QMainWindow>
 #include <QMap>
+#include <QString>
+#include <QStringList>
 
 class QLabel;
 class QLineEdit;

@@ -4,6 +4,8 @@
 #include <QTcpSocket>
 #include <QString>
 #include <QStringList>
+#include <QByteArray>
+#include <QChar>
 
 class RespClient : public QObject {
     Q_OBJECT
@@ -31,7 +33,7 @@ private slots:
 private:
     QByteArray encodeCommand(const QStringList& parts) const;
     QString tryParseResponse();
-    QString parseValue(int& pos, bool& ok) const;
+    QString parseValue(int& pos, bool& ok, int depth = 0, bool in_array = false) const;
     QString parseLineValue(int& pos, QChar prefix, const QString& label, bool& ok) const;
 
     QTcpSocket socket_;

@@ -2,8 +2,14 @@
     "configurations": [
         {
             "name": "Linux",
+            "compileCommands": "${workspaceFolder}/build-qt/compile_commands.json",
             "includePath": [
-                "${workspaceFolder}/**"
+                "${workspaceFolder}/**",
+                "/usr/include/x86_64-linux-gnu/qt6",
+                "/usr/include/x86_64-linux-gnu/qt6/QtCore",
+                "/usr/include/x86_64-linux-gnu/qt6/QtWidgets",
+                "/usr/include/x86_64-linux-gnu/qt6/QtNetwork",
+                "/usr/include/x86_64-linux-gnu/qt6/QtGui"
             ],
             "defines": [],
             "compilerPath": "/usr/bin/gcc",

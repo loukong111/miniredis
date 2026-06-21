@@ -1,0 +1,17 @@
+# Build outputs
+build/
+build-*/
+
+# Runtime snapshots and temporary persistence files
+snapshot_*.dat
+*.dat.tmp
+
+# Benchmark generated reports
+build/benchmark-report.txt
+build/benchmark-summary.md
+build/benchmark-raw.txt
+
+# Editor and OS noise
+.DS_Store
+*.swp
+*.swo
