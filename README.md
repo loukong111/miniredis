@@ -230,8 +230,6 @@ docs/images/qt-stats.png
 docs/images/benchmark-summary.png
 ```
 
-如果需要完整展示 Qt 控制台，也建议补充 `qt-server.png`、`qt-raw-command.png` 和 `qt-benchmark.png`。
-
 连接服务：
 ![Qt Connect](docs/images/qt-connect.png)
 KV 操作：
@@ -401,5 +399,3 @@ CREATE TABLE IF NOT EXISTS cluster_nodes (
   --node-addr 127.0.0.1:6366 \
   --nodes 127.0.0.1:6366,127.0.0.1:6367,127.0.0.1:6368
 ```
-
-注意：当前集群模式解决的是请求路由、重定向、节点可观测和可选节点发现，不提供数据迁移、副本、故障转移，也不宣称完整兼容 Redis Cluster。
