@@ -40,6 +40,8 @@ void loadEnvironment(AppConfig& config) {
     config.snapshot_interval_sec = getEnvIntOr("MINIREDIS_SNAPSHOT_INTERVAL", config.snapshot_interval_sec);
     config.requirepass = getEnvOr("MINIREDIS_REQUIREPASS", config.requirepass);
     config.max_clients = getEnvSizeOr("MINIREDIS_MAX_CLIENTS", config.max_clients);
+    config.cluster_heartbeat_interval_sec = getEnvIntOr("MINIREDIS_CLUSTER_HEARTBEAT_INTERVAL", config.cluster_heartbeat_interval_sec);
+    config.cluster_fail_threshold = getEnvIntOr("MINIREDIS_CLUSTER_FAIL_THRESHOLD", config.cluster_fail_threshold);
     config.mysql_host = getEnvOr("MINIREDIS_MYSQL_HOST", config.mysql_host);
     config.mysql_user = getEnvOr("MINIREDIS_MYSQL_USER", config.mysql_user);
     config.mysql_pass = getEnvOr("MINIREDIS_MYSQL_PASS", config.mysql_pass);
@@ -73,6 +75,8 @@ void printUsage(const char* program) {
         << "  --max-clients count       Maximum concurrent RESP clients (default: 10000)\n"
         << "  --cluster                 Enable experimental cluster routing\n"
         << "  --enable-node-discovery   Enable MySQL-backed cluster node discovery\n"
+        << "  --cluster-heartbeat sec   Cluster heartbeat interval (default: 2)\n"
+        << "  --cluster-fail-threshold count  Failed heartbeats before marking fail (default: 3)\n"
         << "  --node-addr ip:port       Current cluster node address\n"
         << "  --nodes a:port,b:port     Initial cluster nodes\n"
         << "  --mysql-host host         MySQL host for cluster discovery\n"
@@ -88,6 +92,8 @@ ConfigParseResult parseConfig(int argc, char* argv[], AppConfig& config) {
     static struct option long_options[] = {
         {"cluster",           no_argument,       0, 'c'},
         {"enable-node-discovery", no_argument,   0, 1007},
+        {"cluster-heartbeat", required_argument, 0, 1009},
+        {"cluster-fail-threshold", required_argument, 0, 1010},
         {"node-addr",         required_argument, 0, 'a'},
         {"nodes",             required_argument, 0, 'n'},
         {"bind",              required_argument, 0, 'b'},
@@ -114,6 +120,8 @@ ConfigParseResult parseConfig(int argc, char* argv[], AppConfig& config) {
             switch (opt) {
                 case 'c': config.cluster_mode = true; break;
                 case 1007: config.enable_node_discovery = true; break;
+                case 1009: config.cluster_heartbeat_interval_sec = std::stoi(optarg); break;
+                case 1010: config.cluster_fail_threshold = std::stoi(optarg); break;
                 case 'a': config.node_addr = optarg; break;
                 case 'n': config.nodes_str = optarg; break;
                 case 'b': config.bind_addr = optarg; break;
@@ -154,6 +162,10 @@ ConfigParseResult parseConfig(int argc, char* argv[], AppConfig& config) {
     }
     if (config.max_clients == 0) {
         std::cerr << "max clients must be positive" << std::endl;
+        return ConfigParseResult::Error;
+    }
+    if (config.cluster_heartbeat_interval_sec <= 0 || config.cluster_fail_threshold <= 0) {
+        std::cerr << "cluster heartbeat and fail threshold must be positive" << std::endl;
         return ConfigParseResult::Error;
     }
     return ConfigParseResult::Ok;

@@ -6,6 +6,7 @@
 #include <chrono>
 #include <optional>
 #include <memory>
+#include <vector>
 #include "miniredis/core/memory_pool.hpp"   // 添加内存池头文件
 
 namespace miniredis {
@@ -41,6 +42,7 @@ public:
     bool expire(const std::string& key, int ttl_seconds);
     long long ttl(const std::string& key);
     size_t cleanup();   // 清理过期条目，释放内存池内存
+    std::vector<std::string> keys() const;
 
     std::unordered_map<std::string, std::string> snapshot() const;
     void load_snapshot(const std::unordered_map<std::string, std::string>& data);

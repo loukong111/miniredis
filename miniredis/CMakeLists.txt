@@ -4,6 +4,7 @@ project(miniredis VERSION 1.0.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # 项目通过 option 控制测试维度，实现“开发构建”和“CI 构建”分离。
 option(MINIREDIS_ENABLE_INTEGRATION_TESTS "Enable redis-cli/curl based integration tests" ON)

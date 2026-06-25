@@ -18,6 +18,8 @@ struct AppConfig {
 
     bool cluster_mode = false;
     bool enable_node_discovery = false;
+    int cluster_heartbeat_interval_sec = 2;
+    int cluster_fail_threshold = 3;
     std::string node_addr;
     std::string nodes_str;
 

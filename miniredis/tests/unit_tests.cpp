@@ -244,6 +244,14 @@ static void testClusterSlotMap() {
     assert(slot_map.GetNodeForSlot(8191) == "127.0.0.1:6366");
     assert(slot_map.GetNodeForSlot(8192) == "127.0.0.1:6367");
     assert(slot_map.GetNodeForSlot(16383) == "127.0.0.1:6367");
+    assert(slot_map.AssignedSlotCount() == kRedisClusterSlots);
+    assert(slot_map.GetEpoch() == 1);
+    assert(slot_map.FailedNodeCount() == 0);
+    slot_map.MarkNodeFailed("127.0.0.1:6367");
+    assert(slot_map.IsNodeFailed("127.0.0.1:6367"));
+    assert(slot_map.FailedNodeCount() == 1);
+    slot_map.MarkNodeHealthy("127.0.0.1:6367");
+    assert(!slot_map.IsNodeFailed("127.0.0.1:6367"));
 
     auto nodes = slot_map.GetAllNodes();
     assert(nodes.size() == 2);
@@ -274,6 +282,14 @@ static void testClusterCommands() {
     std::string keyslot = handler.handle(command({"CLUSTER", "KEYSLOT", "foo{bar}1"}), authenticated);
     assert(keyslot == ":" + std::to_string(clusterHashSlot("foo{bar}1")) + "\r\n");
 
+    std::string myid = handler.handle(command({"CLUSTER", "MYID"}), authenticated);
+    assert(myid.find(clusterNodeId("127.0.0.1:6366")) != std::string::npos);
+
+    std::string set_resp = handler.handle(command({"SET", "foo{bar}1", "one"}), authenticated);
+    assert(set_resp == "+OK\r\n");
+    std::string count_resp = handler.handle(command({"CLUSTER", "COUNTKEYSINSLOT", std::to_string(clusterHashSlot("foo{bar}1"))}), authenticated);
+    assert(count_resp == ":1\r\n");
+
     std::string nodes = handler.handle(command({"CLUSTER", "NODES"}), authenticated);
     assert(nodes.find("127.0.0.1:6366") != std::string::npos);
     assert(nodes.find("127.0.0.1:6367") != std::string::npos);
@@ -284,6 +300,18 @@ static void testClusterCommands() {
     std::string info = handler.handle(command({"CLUSTER", "INFO"}), authenticated);
     assert(info.find("cluster_enabled:1") != std::string::npos);
     assert(info.find("cluster_known_nodes:2") != std::string::npos);
+    assert(info.find("cluster_failed_nodes:0") != std::string::npos);
+    assert(info.find("cluster_slots_assigned:16384") != std::string::npos);
+    assert(info.find("cluster_current_epoch:1") != std::string::npos);
+
+    slot_map.MarkNodeFailed("127.0.0.1:6367");
+    std::string failed_info = handler.handle(command({"CLUSTER", "INFO"}), authenticated);
+    assert(failed_info.find("cluster_state:fail") != std::string::npos);
+    assert(failed_info.find("cluster_failed_nodes:1") != std::string::npos);
+    std::string failed_nodes = handler.handle(command({"CLUSTER", "NODES"}), authenticated);
+    assert(failed_nodes.find("127.0.0.1:6367 master,fail") != std::string::npos);
+    assert(failed_nodes.find("disconnected") != std::string::npos);
+    slot_map.MarkNodeHealthy("127.0.0.1:6367");
 
     std::string slots = handler.handle(command({"CLUSTER", "SLOTS"}), authenticated);
     RespDecoder decoder;

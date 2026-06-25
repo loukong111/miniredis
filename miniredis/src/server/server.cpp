@@ -11,8 +11,10 @@
 #include <fcntl.h>
 #include <iostream>
 #include <netinet/in.h>
+#include <unordered_map>
 #include <sstream>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 #include <utility>
 #include <vector>
@@ -32,6 +34,102 @@ bool setNonBlocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags < 0) return false;
     return fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0;
+}
+
+bool splitNodeAddr(const std::string& node, std::string& host, int& port) {
+    size_t pos = node.rfind(':');
+    if (pos == std::string::npos || pos == 0 || pos + 1 >= node.size()) return false;
+    host = node.substr(0, pos);
+    try {
+        port = std::stoi(node.substr(pos + 1));
+    } catch (...) {
+        return false;
+    }
+    return port > 0 && port <= 65535;
+}
+
+std::string encodeRespCommand(const std::vector<std::string>& parts) {
+    std::string out = "*" + std::to_string(parts.size()) + "\r\n";
+    for (const auto& part : parts) {
+        out += "$" + std::to_string(part.size()) + "\r\n";
+        out += part + "\r\n";
+    }
+    return out;
+}
+
+bool writeAllBlocking(int fd, const std::string& data) {
+    size_t written = 0;
+    while (written < data.size()) {
+        ssize_t n = write(fd, data.data() + written, data.size() - written);
+        if (n > 0) {
+            written += static_cast<size_t>(n);
+            continue;
+        }
+        if (n < 0 && errno == EINTR) continue;
+        return false;
+    }
+    return true;
+}
+
+bool readRespLine(int fd, std::string& line) {
+    line.clear();
+    char ch = '\0';
+    while (line.size() < 1024) {
+        ssize_t n = read(fd, &ch, 1);
+        if (n > 0) {
+            line.push_back(ch);
+            if (line.size() >= 2 && line[line.size() - 2] == '\r' && line[line.size() - 1] == '\n') {
+                return true;
+            }
+            continue;
+        }
+        if (n < 0 && errno == EINTR) continue;
+        return false;
+    }
+    return false;
+}
+
+bool sendHeartbeatCommand(int fd, const std::vector<std::string>& command, const std::string& expected) {
+    if (!writeAllBlocking(fd, encodeRespCommand(command))) return false;
+    std::string line;
+    if (!readRespLine(fd, line)) return false;
+    return line.rfind(expected, 0) == 0;
+}
+
+bool pingClusterNode(const std::string& node, const std::string& password) {
+    std::string host;
+    int port = 0;
+    if (!splitNodeAddr(node, host, port)) return false;
+
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return false;
+
+    timeval timeout{};
+    timeout.tv_sec = 1;
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
+        close(fd);
+        return false;
+    }
+    if (connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+        close(fd);
+        return false;
+    }
+
+    bool ok = true;
+    if (!password.empty()) {
+        ok = sendHeartbeatCommand(fd, {"AUTH", password}, "+OK");
+    }
+    if (ok) {
+        ok = sendHeartbeatCommand(fd, {"PING"}, "+PONG");
+    }
+    close(fd);
+    return ok;
 }
 
 std::vector<std::string> parseClusterNodes(const std::string& nodes_str) {
@@ -261,39 +359,78 @@ void MiniRedisServer::startStatsServer() {
 }
 
 void MiniRedisServer::startClusterDiscovery() {
-    if (!config_.cluster_mode || !config_.enable_node_discovery) return;
+    if (!config_.cluster_mode || !slot_map_) return;
 
 #ifdef HAVE_MYSQL
-    try {
-        mysql_ = std::make_unique<MySQLClient>(config_.mysql_host, config_.mysql_user,
-                                               config_.mysql_pass, config_.mysql_db,
-                                               static_cast<unsigned int>(config_.mysql_port));
-    } catch (const std::exception& e) {
-        std::cerr << "MySQL cluster discovery disabled: " << e.what() << std::endl;
-        return;
-    }
+    if (config_.enable_node_discovery) {
+        try {
+            mysql_ = std::make_unique<MySQLClient>(config_.mysql_host, config_.mysql_user,
+                                                   config_.mysql_pass, config_.mysql_db,
+                                                   static_cast<unsigned int>(config_.mysql_port));
+        } catch (const std::exception& e) {
+            std::cerr << "MySQL cluster discovery disabled: " << e.what() << std::endl;
+        }
 
-    if (!mysql_->registerNode(current_node_, 30)) {
-        std::cerr << "Failed to register node in cluster table" << std::endl;
+        if (mysql_ && !mysql_->registerNode(current_node_, 30)) {
+            std::cerr << "Failed to register node in cluster table" << std::endl;
+        }
     }
+#else
+    if (config_.enable_node_discovery) {
+        std::cerr << "MySQL support is not available; dynamic node discovery disabled." << std::endl;
+    }
+#endif
 
     cluster_refresh_thread_ = std::thread([this]() {
+        std::unordered_map<std::string, int> failed_heartbeats;
+        int discovery_elapsed_sec = 0;
+
         while (running_.load() && config_.cluster_mode) {
-            for (int i = 0; i < 10 && running_.load(); ++i) {
+            for (int i = 0; i < config_.cluster_heartbeat_interval_sec && running_.load(); ++i) {
                 std::this_thread::sleep_for(std::chrono::seconds(1));
             }
             if (!running_.load()) break;
 
-            auto nodes = mysql_->getActiveNodes(30);
-            if (!nodes.empty()) {
+#ifdef HAVE_MYSQL
+            discovery_elapsed_sec += config_.cluster_heartbeat_interval_sec;
+            if (mysql_ && discovery_elapsed_sec >= 10) {
+                discovery_elapsed_sec = 0;
+                auto nodes = mysql_->getActiveNodes(30);
+                if (!nodes.empty()) {
+                    std::lock_guard<std::mutex> lock(slot_map_mutex_);
+                    slot_map_->Rebuild(nodes);
+                }
+            }
+#endif
+
+            std::vector<std::string> nodes;
+            {
                 std::lock_guard<std::mutex> lock(slot_map_mutex_);
-                slot_map_->Rebuild(nodes);
+                nodes = slot_map_->GetAllNodes();
+            }
+
+            for (const auto& node : nodes) {
+                if (node == current_node_) {
+                    failed_heartbeats[node] = 0;
+                    std::lock_guard<std::mutex> lock(slot_map_mutex_);
+                    slot_map_->MarkNodeHealthy(node);
+                    continue;
+                }
+
+                bool ok = pingClusterNode(node, config_.requirepass);
+                std::lock_guard<std::mutex> lock(slot_map_mutex_);
+                if (ok) {
+                    failed_heartbeats[node] = 0;
+                    slot_map_->MarkNodeHealthy(node);
+                } else {
+                    int failures = ++failed_heartbeats[node];
+                    if (failures >= config_.cluster_fail_threshold) {
+                        slot_map_->MarkNodeFailed(node);
+                    }
+                }
             }
         }
     });
-#else
-    std::cerr << "MySQL support is not available; dynamic node discovery disabled." << std::endl;
-#endif
 }
 
 int MiniRedisServer::run() {

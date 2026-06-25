@@ -154,6 +154,16 @@ size_t CacheStore::cleanup() {
     return removed;
 }
 
+std::vector<std::string> CacheStore::keys() const {
+    std::shared_lock lock(mtx_);
+    std::vector<std::string> result;
+    result.reserve(store_.size());
+    for (const auto& [key, entry] : store_) {
+        if (!entry.is_expired()) result.push_back(key);
+    }
+    return result;
+}
+
 std::unordered_map<std::string, std::string> CacheStore::snapshot() const {
     std::shared_lock lock(mtx_);
     std::unordered_map<std::string, std::string> result;

@@ -1,0 +1,11 @@
+.git
+.agents
+.codex
+.vscode
+build
+build-*
+docs/images/*.png
+*.dat
+*.dat.tmp
+Dockerfile
+docker-compose.yml

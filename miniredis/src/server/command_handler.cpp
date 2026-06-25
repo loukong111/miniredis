@@ -82,6 +82,12 @@ bool parsePositiveInt(const std::string& value, int& out) {
     return ec == std::errc() && ptr == value.data() + value.size() && out > 0;
 }
 
+bool parseSlot(const std::string& value, int& out) {
+    auto [ptr, ec] = std::from_chars(value.data(), value.data() + value.size(), out);
+    return ec == std::errc() && ptr == value.data() + value.size() &&
+           out >= 0 && out < kRedisClusterSlots;
+}
+
 bool splitNodeAddr(const std::string& node, std::string& host, int& port) {
     size_t pos = node.rfind(':');
     if (pos == std::string::npos || pos == 0 || pos + 1 >= node.size()) return false;
@@ -186,12 +192,48 @@ std::string CommandHandler::handleClusterCommand(const RespValue& cmd) const {
         return RespWriter::integer(clusterHashSlot(cmd.array[2].str));
     }
 
+    if (subcmd == "MYID") {
+        if (cmd.array.size() != 2) {
+            return RespWriter::error("wrong number of arguments for 'cluster myid'");
+        }
+        return RespWriter::bulkString(clusterNodeId(current_node_));
+    }
+
+    if (subcmd == "COUNTKEYSINSLOT") {
+        if (cmd.array.size() != 3 || cmd.array[2].type != RespType::BULK_STRING) {
+            return RespWriter::error("wrong number of arguments for 'cluster countkeysinslot'");
+        }
+        int slot = 0;
+        if (!parseSlot(cmd.array[2].str, slot)) {
+            return RespWriter::error("invalid slot");
+        }
+        long long count = 0;
+        for (const auto& key : cache_.keys()) {
+            if (clusterHashSlot(key) == static_cast<uint16_t>(slot)) {
+                ++count;
+            }
+        }
+        return RespWriter::integer(count);
+    }
+
     if (subcmd == "INFO") {
         auto nodes = clusterNodes();
+        size_t assigned_slots = 0;
+        size_t failed_nodes = 0;
+        uint64_t epoch = 0;
+        if (slot_map_ && slot_map_mutex_) {
+            std::lock_guard<std::mutex> lock(*slot_map_mutex_);
+            assigned_slots = slot_map_->AssignedSlotCount();
+            failed_nodes = slot_map_->FailedNodeCount();
+            epoch = slot_map_->GetEpoch();
+        }
         std::ostringstream oss;
         oss << "cluster_enabled:" << (cluster_mode_ ? "1" : "0") << "\r\n";
-        oss << "cluster_state:" << (cluster_mode_ && nodes.empty() ? "fail" : "ok") << "\r\n";
+        oss << "cluster_state:" << (cluster_mode_ && (nodes.empty() || failed_nodes > 0) ? "fail" : "ok") << "\r\n";
+        oss << "cluster_slots_assigned:" << assigned_slots << "\r\n";
         oss << "cluster_known_nodes:" << nodes.size() << "\r\n";
+        oss << "cluster_failed_nodes:" << failed_nodes << "\r\n";
+        oss << "cluster_current_epoch:" << epoch << "\r\n";
         oss << "cluster_current_node:" << current_node_ << "\r\n";
         //Redis 的很多 info 类命令会返回一整段文本，所以用 bulk string 很合适。
         //$96\r\ncluster_enabled:1\r\ncluster_state:ok\r\ncluster_known_nodes:2\r\ncluster_current_node:127.0.0.1:6366\r\n\r\n
@@ -207,10 +249,15 @@ std::string CommandHandler::handleClusterCommand(const RespValue& cmd) const {
         std::ostringstream oss;
         for (const auto& node : nodes) {
             bool myself = (node == current_node_);
+            bool failed = false;
+            if (slot_map_ && slot_map_mutex_) {
+                std::lock_guard<std::mutex> lock(*slot_map_mutex_);
+                failed = slot_map_->IsNodeFailed(node);
+            }
             oss << clusterNodeId(node) << " "
                 << node << " "
-                << (myself ? "myself,master" : "master")
-                << " - 0 0 0 connected";
+                << (myself ? "myself,master" : (failed ? "master,fail" : "master"))
+                << " - 0 0 0 " << (failed ? "disconnected" : "connected");
             if (slot_map_ && slot_map_mutex_) {
                 std::lock_guard<std::mutex> lock(*slot_map_mutex_);
                 for (const auto& range : slot_map_->GetSlotRangesForNode(node)) {

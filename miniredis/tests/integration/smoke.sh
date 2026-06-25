@@ -117,6 +117,7 @@ run_auth_kv_stats_snapshot_smoke() {
   grep -q '"latency_samples":' <<<"${stats}"
   grep -q '"avg_command_latency_us":' <<<"${stats}"
   grep -q '"max_command_latency_us":' <<<"${stats}"
+  "${CURL}" -fsS "http://127.0.0.1:${stats_port}/healthz" | grep -q '"status":"ok"'
   metrics="$("${CURL}" -fsS "http://127.0.0.1:${stats_port}/metrics")"
   grep -q 'miniredis_total_commands' <<<"${metrics}"
   grep -q 'miniredis_hit_rate' <<<"${metrics}"
@@ -159,11 +160,21 @@ run_cluster_smoke() {
   info="$("${REDIS_CLI}" -p "${port}" --raw CLUSTER INFO)"
   grep -q 'cluster_enabled:1' <<<"${info}"
   grep -q 'cluster_known_nodes:1' <<<"${info}"
+  grep -q 'cluster_slots_assigned:16384' <<<"${info}"
+  grep -q 'cluster_failed_nodes:0' <<<"${info}"
+  grep -q 'cluster_current_epoch:' <<<"${info}"
 
   nodes="$("${REDIS_CLI}" -p "${port}" --raw CLUSTER NODES)"
   grep -q "127.0.0.1:${port}" <<<"${nodes}"
   grep -q 'myself,master' <<<"${nodes}"
   grep -q '0-16383' <<<"${nodes}"
+
+  local myid
+  myid="$("${REDIS_CLI}" -p "${port}" --raw CLUSTER MYID)"
+  if [[ ! "${myid}" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "assertion failed for cluster myid: expected 40 hex chars, got '${myid}'" >&2
+    exit 1
+  fi
 
   keyslot="$("${REDIS_CLI}" -p "${port}" --raw CLUSTER KEYSLOT 'foo{bar}1')"
   assert_eq "${keyslot}" "5061" "cluster keyslot"
@@ -174,6 +185,8 @@ run_cluster_smoke() {
 
   assert_eq "$("${REDIS_CLI}" -p "${port}" --raw SET cluster_probe ok)" "OK" "cluster set"
   assert_eq "$("${REDIS_CLI}" -p "${port}" --raw GET cluster_probe)" "ok" "cluster get"
+  assert_eq "$("${REDIS_CLI}" -p "${port}" --raw SET 'foo{bar}1' one)" "OK" "cluster hash tag set"
+  assert_eq "$("${REDIS_CLI}" -p "${port}" --raw CLUSTER COUNTKEYSINSLOT "${keyslot}")" "1" "cluster countkeysinslot"
   stop_server
 }
 
