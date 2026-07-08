@@ -11,6 +11,8 @@ Environment=MINIREDIS_BIND=127.0.0.1
 Environment=MINIREDIS_PORT=6366
 Environment=MINIREDIS_STATS_BIND=127.0.0.1
 Environment=MINIREDIS_STATS_PORT=8080
+Environment=MINIREDIS_LOG_LEVEL=info
+Environment=MINIREDIS_LOG_FILE=/var/log/miniredis/miniredis.log
 Environment=MINIREDIS_SNAPSHOT_FILE=/var/lib/miniredis/snapshot_6366.dat
 Environment=MINIREDIS_SNAPSHOT_INTERVAL=20
 EnvironmentFile=-/etc/miniredis/miniredis.env
@@ -22,7 +24,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=true
-ReadWritePaths=/var/lib/miniredis
+ReadWritePaths=/var/lib/miniredis /var/log/miniredis
 
 [Install]
 WantedBy=multi-user.target

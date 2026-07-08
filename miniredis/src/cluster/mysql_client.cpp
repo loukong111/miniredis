@@ -1,5 +1,5 @@
+#include "miniredis/core/logger.hpp"
 #include "miniredis/cluster/mysql_client.hpp"
-#include <iostream>
 #include <sstream>
 
 namespace miniredis {
@@ -56,7 +56,7 @@ bool MySQLClient::ensureConnection() {
 bool MySQLClient::executeQuery(const std::string& sql) {
     if (!ensureConnection()) return false;
     if (mysql_query(conn_, sql.c_str())) {
-        std::cerr << "MySQL query error: " << mysql_error(conn_) << "\nSQL: " << sql << std::endl;
+        MINIREDIS_LOG_ERROR("mysql") << "query error: " << mysql_error(conn_) << " SQL: " << sql;
         return false;
     }
     return true;
@@ -66,7 +66,7 @@ bool MySQLClient::loadAll(std::unordered_map<std::string, std::string>& out) {
     if (!ensureConnection()) return false;
     const std::string sql = "SELECT cache_key, cache_value FROM cache_snapshot";
     if (mysql_query(conn_, sql.c_str())) {
-        std::cerr << "MySQL loadAll error: " << mysql_error(conn_) << std::endl;
+        MINIREDIS_LOG_ERROR("mysql") << "loadAll error: " << mysql_error(conn_);
         return false;
     }
     MYSQL_RES* res = mysql_store_result(conn_);
@@ -104,7 +104,7 @@ bool MySQLClient::saveSnapshot(const std::unordered_map<std::string, std::string
         delete[] escapedVal;
     }
     if (mysql_query(conn_, oss.str().c_str())) {
-        std::cerr << "MySQL insert error: " << mysql_error(conn_) << std::endl;
+        MINIREDIS_LOG_ERROR("mysql") << "insert error: " << mysql_error(conn_);
         executeQuery("ROLLBACK");
         return false;
     }
@@ -118,7 +118,7 @@ bool MySQLClient::registerNode(const std::string& node_addr, int ttl_sec) {
     std::string sql = "INSERT INTO cluster_nodes (node_addr, last_seen) VALUES ('" + node_addr + "', NOW()) "
                       "ON DUPLICATE KEY UPDATE last_seen = NOW()";
     if (mysql_query(conn_, sql.c_str())) {
-        std::cerr << "registerNode failed: " << mysql_error(conn_) << std::endl;
+        MINIREDIS_LOG_ERROR("mysql") << "registerNode failed: " << mysql_error(conn_);
         return false;
     }
     return true;
@@ -130,7 +130,7 @@ std::vector<std::string> MySQLClient::getActiveNodes(int timeout_sec) {
     if (!ensureConnection()) return nodes;
     std::string sql = "SELECT node_addr FROM cluster_nodes WHERE last_seen > NOW() - INTERVAL " + std::to_string(timeout_sec) + " SECOND";
     if (mysql_query(conn_, sql.c_str())) {
-        std::cerr << "getActiveNodes query failed: " << mysql_error(conn_) << std::endl;
+        MINIREDIS_LOG_ERROR("mysql") << "getActiveNodes query failed: " << mysql_error(conn_);
         return nodes;
     }
     MYSQL_RES* res = mysql_store_result(conn_);

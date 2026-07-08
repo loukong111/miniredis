@@ -1,3 +1,4 @@
+#include "miniredis/core/logger.hpp"
 #include "miniredis/metrics/stats.hpp"
 #include "miniredis/metrics/http_stats.hpp"
 #include <arpa/inet.h>
@@ -12,7 +13,6 @@
 #include <cstring>
 #include <thread>
 #include <atomic>
-#include <iostream>
 #include <string>
 #include <string_view>
 
@@ -109,6 +109,12 @@ static void handle_client(int client_fd) {
         const std::string body = "{\"status\":\"ok\"}\n";
         std::string response = make_response("200 OK", "application/json", body);
         write_all(client_fd, response);
+    } else if (request_line_matches(request, "GET", "/readyz")) {
+        const bool ready = Stats::instance().ready();
+        const std::string body = ready ? "{\"status\":\"ready\"}\n" : "{\"status\":\"not_ready\"}\n";
+        std::string response = make_response(ready ? "200 OK" : "503 Service Unavailable",
+                                             "application/json", body);
+        write_all(client_fd, response);
     } else {
         const std::string response = make_response("404 Not Found", "text/plain", "not found\n");
         write_all(client_fd, response);
@@ -119,7 +125,7 @@ static void handle_client(int client_fd) {
 void start_stats_http_server(const std::string& bind_addr, int port, std::atomic<bool>& running) {
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) {
-        perror("stats server socket");
+        MINIREDIS_LOG_ERROR("stats") << "stats server socket failed: " << std::strerror(errno);
         return;
     }
     int opt = 1;
@@ -128,22 +134,22 @@ void start_stats_http_server(const std::string& bind_addr, int port, std::atomic
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
     if (inet_pton(AF_INET, bind_addr.c_str(), &addr.sin_addr) != 1) {
-        std::cerr << "Invalid stats bind address: " << bind_addr << std::endl;
+        MINIREDIS_LOG_ERROR("stats") << "invalid stats bind address: " << bind_addr;
         close(server_fd);
         return;
     }
     if (bind(server_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        perror("stats server bind");
+        MINIREDIS_LOG_ERROR("stats") << "stats server bind failed: " << std::strerror(errno);
         close(server_fd);
         return;
     }
     if (listen(server_fd, 128) < 0) {
-        perror("stats server listen");
+        MINIREDIS_LOG_ERROR("stats") << "stats server listen failed: " << std::strerror(errno);
         close(server_fd);
         return;
     }
     fcntl(server_fd, F_SETFL, fcntl(server_fd, F_GETFL) | O_NONBLOCK);
-    std::cout << "Stats HTTP server listening on " << bind_addr << ":" << port << std::endl;
+    MINIREDIS_LOG_INFO("stats") << "Stats HTTP server listening on " << bind_addr << ":" << port;
 
     while (running) {
         int client_fd = accept(server_fd, nullptr, nullptr);
@@ -153,7 +159,7 @@ void start_stats_http_server(const std::string& bind_addr, int port, std::atomic
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 continue;
             }
-            perror("stats server accept");
+            MINIREDIS_LOG_WARN("stats") << "stats server accept failed: " << std::strerror(errno);
             break;
         }
         // 同步写法，stats HTTP server 一次只处理一个客户端。

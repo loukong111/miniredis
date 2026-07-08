@@ -5,6 +5,12 @@ build-*/
 # Runtime snapshots and temporary persistence files
 snapshot_*.dat
 *.dat.tmp
+*.dat.bak
+*.dat.bad
+*.aof
+*.aof.rewrite.tmp
+cluster_*.conf
+*.log
 
 # Benchmark generated reports
 build/benchmark-report.txt
@@ -15,3 +21,7 @@ build/benchmark-raw.txt
 .DS_Store
 *.swp
 *.swo
+
+# Local AI assistant workspace/cache
+.codex/
+.agents/

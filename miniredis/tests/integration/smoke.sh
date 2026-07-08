@@ -76,6 +76,7 @@ run_auth_kv_stats_snapshot_smoke() {
     --stats-port "${stats_port}" \
     --snapshot-file "${snapshot}" \
     --snapshot-interval 30 \
+    --slowlog-log-slower-than-us 1 \
     --requirepass secret >"${log}" 2>&1 &
   PID="$!"
   wait_for_auth_server "${port}"
@@ -104,23 +105,62 @@ run_auth_kv_stats_snapshot_smoke() {
   assert_eq "$("${REDIS_CLI}" -p "${port}" -a secret --raw EXISTS alpha 2>/dev/null)" "1" "exists alpha"
   assert_eq "$("${REDIS_CLI}" -p "${port}" -a secret --raw DEL alpha 2>/dev/null)" "1" "del alpha"
   assert_eq "$("${REDIS_CLI}" -p "${port}" -a secret --raw EXISTS alpha 2>/dev/null)" "0" "exists deleted alpha"
-  assert_eq "$("${REDIS_CLI}" -p "${port}" -a secret --raw COMMAND COUNT 2>/dev/null)" "11" "command count"
+  assert_eq "$("${REDIS_CLI}" -p "${port}" -a secret --raw COMMAND COUNT 2>/dev/null)" "17" "command count"
+  local info_memory
+  info_memory="$("${REDIS_CLI}" -p "${port}" -a secret --raw INFO memory 2>/dev/null)"
+  grep -q '# Memory' <<<"${info_memory}"
+  grep -q 'used_memory:' <<<"${info_memory}"
+  grep -q 'maxmemory_policy:' <<<"${info_memory}"
+  grep -q 'cache_shards:' <<<"${info_memory}"
+  "${REDIS_CLI}" -p "${port}" -a secret --raw INFO server 2>/dev/null | grep -q 'io_threads:'
+  local slowlog_len slowlog_get
+  slowlog_len="$("${REDIS_CLI}" -p "${port}" -a secret --raw SLOWLOG LEN 2>/dev/null)"
+  if [[ "${slowlog_len}" -lt 1 ]]; then
+    echo "assertion failed for slowlog len: expected >=1, got '${slowlog_len}'" >&2
+    exit 1
+  fi
+  slowlog_get="$("${REDIS_CLI}" -p "${port}" -a secret --raw SLOWLOG GET 1 2>/dev/null)"
+  grep -Eq 'AUTH|PING|SET|GET|MGET|INFO|SLOWLOG|COMMAND' <<<"${slowlog_get}"
 
   local stats metrics
   stats="$("${CURL}" -fsS "http://127.0.0.1:${stats_port}/stats")"
   grep -q '"key_count":1' <<<"${stats}"
+  grep -q '"cache_shards":' <<<"${stats}"
+  grep -q '"io_threads":' <<<"${stats}"
   grep -q '"mem_pool_used_blocks":1' <<<"${stats}"
   grep -q '"connected_clients":0' <<<"${stats}"
   grep -q '"total_connections":' <<<"${stats}"
   grep -q '"rejected_connections":0' <<<"${stats}"
   grep -q '"hit_rate":' <<<"${stats}"
+  grep -q '"used_memory_bytes":' <<<"${stats}"
+  grep -q '"maxmemory_bytes":' <<<"${stats}"
+  grep -q '"evicted_keys":' <<<"${stats}"
   grep -q '"latency_samples":' <<<"${stats}"
   grep -q '"avg_command_latency_us":' <<<"${stats}"
   grep -q '"max_command_latency_us":' <<<"${stats}"
+  grep -q '"slowlog_len":' <<<"${stats}"
+  grep -q '"slowlog_log_slower_than_us":' <<<"${stats}"
+  grep -q '"max_request_bytes":' <<<"${stats}"
+  grep -q '"max_pipeline_commands":' <<<"${stats}"
+  grep -q '"client_output_buffer_limit":' <<<"${stats}"
+  grep -q '"snapshot_running":' <<<"${stats}"
+  grep -q '"snapshot_last_duration_ms":' <<<"${stats}"
+  grep -q '"aof_rewrite_running":' <<<"${stats}"
+  grep -q '"aof_last_rewrite_records":' <<<"${stats}"
   "${CURL}" -fsS "http://127.0.0.1:${stats_port}/healthz" | grep -q '"status":"ok"'
+  "${CURL}" -fsS "http://127.0.0.1:${stats_port}/readyz" | grep -q '"status":"ready"'
   metrics="$("${CURL}" -fsS "http://127.0.0.1:${stats_port}/metrics")"
   grep -q 'miniredis_total_commands' <<<"${metrics}"
   grep -q 'miniredis_hit_rate' <<<"${metrics}"
+  grep -q 'miniredis_used_memory_bytes' <<<"${metrics}"
+  grep -q 'miniredis_evicted_keys' <<<"${metrics}"
+  grep -q 'miniredis_slowlog_len' <<<"${metrics}"
+  grep -q 'miniredis_max_request_bytes' <<<"${metrics}"
+  grep -q 'miniredis_snapshot_running' <<<"${metrics}"
+  grep -q 'miniredis_aof_rewrite_running' <<<"${metrics}"
+  grep -q 'miniredis_ready 1' <<<"${metrics}"
+  grep -q 'miniredis_io_threads' <<<"${metrics}"
+  assert_eq "$("${REDIS_CLI}" -p "${port}" -a secret --raw SET ttl_restore keep EX 30 2>/dev/null)" "OK" "set ttl_restore"
 
   stop_server
 
@@ -131,10 +171,18 @@ run_auth_kv_stats_snapshot_smoke() {
     --stats-port "${stats_port}" \
     --snapshot-file "${snapshot}" \
     --snapshot-interval 30 \
+    --slowlog-log-slower-than-us 1 \
     --requirepass secret >"${log}.restart" 2>&1 &
   PID="$!"
   wait_for_auth_server "${port}"
   assert_eq "$("${REDIS_CLI}" -p "${port}" -a secret --raw GET spaced 2>/dev/null)" "hello world" "snapshot restore"
+  assert_eq "$("${REDIS_CLI}" -p "${port}" -a secret --raw GET ttl_restore 2>/dev/null)" "keep" "snapshot ttl restore value"
+  local restored_ttl
+  restored_ttl="$("${REDIS_CLI}" -p "${port}" -a secret --raw TTL ttl_restore 2>/dev/null)"
+  if [[ "${restored_ttl}" -lt 1 || "${restored_ttl}" -gt 30 ]]; then
+    echo "assertion failed for restored ttl: expected 1..30, got '${restored_ttl}'" >&2
+    exit 1
+  fi
   stop_server
 }
 
@@ -162,6 +210,7 @@ run_cluster_smoke() {
   grep -q 'cluster_known_nodes:1' <<<"${info}"
   grep -q 'cluster_slots_assigned:16384' <<<"${info}"
   grep -q 'cluster_failed_nodes:0' <<<"${info}"
+  grep -q 'cluster_suspect_nodes:0' <<<"${info}"
   grep -q 'cluster_current_epoch:' <<<"${info}"
 
   nodes="$("${REDIS_CLI}" -p "${port}" --raw CLUSTER NODES)"

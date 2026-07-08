@@ -20,7 +20,7 @@ done
 
 usage() {
   cat <<EOF
-usage: $0 start|stop|status|smoke|fail-smoke|clean
+usage: $0 start|stop|status|smoke|fail-smoke|migrate-smoke|clean
 
 Environment:
   SERVER=${SERVER}
@@ -42,6 +42,10 @@ is_running() {
   [[ -f "${pid_file}" ]] && kill -0 "$(cat "${pid_file}")" 2>/dev/null
 }
 
+reset_demo_state() {
+  rm -f "${WORKDIR}"/cluster_*.conf "${WORKDIR}"/snapshot_*.dat
+}
+
 start_cluster() {
   local index=0
   for port in ${PORTS}; do
@@ -56,6 +60,7 @@ start_cluster() {
     local stats_port=$((BASE_STATS_PORT + index))
     local log_file="${WORKDIR}/node_${port}.log"
     local snapshot_file="${WORKDIR}/snapshot_${port}.dat"
+    local cluster_config_file="${WORKDIR}/cluster_${port}.conf"
 
     "${SERVER}" \
       --cluster \
@@ -63,6 +68,7 @@ start_cluster() {
       --port "${port}" \
       --node-addr "${HOST}:${port}" \
       --nodes "${NODES}" \
+      --cluster-config-file "${cluster_config_file}" \
       --stats-bind "${HOST}" \
       --stats-port "${stats_port}" \
       --snapshot-file "${snapshot_file}" \
@@ -110,6 +116,7 @@ status_cluster() {
 
 smoke_cluster() {
   stop_cluster >/dev/null 2>&1 || true
+  reset_demo_state
   start_cluster
   sleep 0.5
 
@@ -128,6 +135,7 @@ smoke_cluster() {
 
 fail_smoke_cluster() {
   stop_cluster >/dev/null 2>&1 || true
+  reset_demo_state
   start_cluster
   sleep 0.5
 
@@ -161,6 +169,61 @@ fail_smoke_cluster() {
   stop_cluster
 }
 
+migrate_smoke_cluster() {
+  stop_cluster >/dev/null 2>&1 || true
+  reset_demo_state
+  start_cluster
+  sleep 0.5
+
+  local first_port
+  first_port="${PORTS%% *}"
+  local target_port=""
+  for port in ${PORTS}; do
+    if [[ "${port}" != "${first_port}" ]]; then
+      target_port="${port}"
+      break
+    fi
+  done
+  if [[ -z "${target_port}" ]]; then
+    echo "migrate-smoke requires at least two ports" >&2
+    stop_cluster
+    exit 1
+  fi
+
+  local node_count
+  node_count="$(wc -w <<<"${PORTS}")"
+  local first_end=$(( (16384 + node_count - 1) / node_count - 1 ))
+  local key=""
+  local slot=""
+  for i in $(seq 1 10000); do
+    local candidate="migrate:{demo-${i}}"
+    local candidate_slot
+    candidate_slot="$("${REDIS_CLI}" -p "${first_port}" --raw CLUSTER KEYSLOT "${candidate}")"
+    if [[ "${candidate_slot}" -le "${first_end}" ]]; then
+      key="${candidate}"
+      slot="${candidate_slot}"
+      break
+    fi
+  done
+  if [[ -z "${key}" ]]; then
+    echo "failed to find a key owned by ${HOST}:${first_port}" >&2
+    stop_cluster
+    exit 1
+  fi
+
+  assert_value="migrated-value"
+  "${REDIS_CLI}" -p "${first_port}" --raw SET "${key}" "${assert_value}" | grep -q '^OK$'
+  "${REDIS_CLI}" -p "${first_port}" --raw CLUSTER COUNTKEYSINSLOT "${slot}" | grep -q '^1$'
+  "${REDIS_CLI}" -p "${first_port}" --raw CLUSTER MIGRATE "${slot}" "${HOST}:${target_port}" | grep -q '^1$'
+  "${REDIS_CLI}" -p "${first_port}" --raw CLUSTER COUNTKEYSINSLOT "${slot}" | grep -q '^0$'
+  "${REDIS_CLI}" -p "${target_port}" --raw CLUSTER COUNTKEYSINSLOT "${slot}" | grep -q '^1$'
+  "${REDIS_CLI}" -p "${target_port}" --raw GET "${key}" | grep -q "^${assert_value}$"
+  "${REDIS_CLI}" -p "${first_port}" --raw CLUSTER NODES | grep -q "${HOST}:${target_port}"
+
+  echo "cluster migrate smoke passed: slot=${slot} key=${key} target=${HOST}:${target_port}"
+  stop_cluster
+}
+
 case "${1:-}" in
   start)
     start_cluster
@@ -176,6 +239,9 @@ case "${1:-}" in
     ;;
   fail-smoke)
     fail_smoke_cluster
+    ;;
+  migrate-smoke)
+    migrate_smoke_cluster
     ;;
   clean)
     stop_cluster

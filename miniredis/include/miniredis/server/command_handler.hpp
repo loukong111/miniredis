@@ -4,25 +4,57 @@
 #include "miniredis/core/cache_store.hpp"
 #include "miniredis/core/memory_pool.hpp"
 #include "miniredis/net/resp_parser.hpp"
+#include "miniredis/persistence/append_only_file.hpp"
 #include "miniredis/server/config.hpp"
+#include "miniredis/server/replication_backlog.hpp"
+#include <atomic>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <vector>
 
 namespace miniredis {
 
+struct CommandSession {
+    bool authenticated = false;
+    bool asking = false;
+    AclRole role = AclRole::Admin;
+    std::string username;
+};
+
 class CommandHandler {
 public:
     CommandHandler(CacheStore& cache, FixedMemoryPool& memory_pool, const AppConfig& config,
                    bool cluster_mode, std::string current_node,
-                   ClusterSlotMap* slot_map, std::mutex* slot_map_mutex);
+                   ClusterSlotMap* slot_map, std::mutex* slot_map_mutex,
+                   AppendOnlyFile* aof = nullptr,
+                   std::function<void()> cluster_change_callback = {},
+                   ReplicationBacklog* replication_backlog = nullptr,
+                   std::atomic<uint64_t>* replication_offset = nullptr,
+                   std::function<void(uint64_t)> replication_offset_callback = {});
 
+    std::string handle(const RespValue& cmd, CommandSession& session);
     std::string handle(const RespValue& cmd, bool& authenticated);
     void refreshRuntimeStats() const;
 
 private:
-    std::string routeIfNeeded(const std::string& cmd_name, const RespValue& cmd) const;
-    std::string handleClusterCommand(const RespValue& cmd) const;
+    bool isReplica() const;
+    bool authRequired() const;
+    bool authenticate(const RespValue& cmd, CommandSession& session) const;
+    bool isAllowed(const std::string& cmd_name, AclRole role) const;
+    std::string validateKey(const RespValue& key) const;
+    std::string validateValue(const RespValue& value) const;
+    std::string handleAclCommand(const RespValue& cmd, const CommandSession& session) const;
+    std::string routeIfNeeded(const std::string& cmd_name, const RespValue& cmd,
+                              CommandSession& session) const;
+    std::string handleInfoCommand(const RespValue& cmd) const;
+    std::string handleSlowLogCommand(const RespValue& cmd) const;
+    std::string handleClusterCommand(const RespValue& cmd);
+    std::string handleClusterFailover(const RespValue& cmd);
+    std::string handleClusterSetSlot(const RespValue& cmd);
+    std::string handleClusterMigrate(const RespValue& cmd);
+    std::string handleReplicationCommand(const std::string& cmd_name, const RespValue& cmd);
+    void replicateWrite(const std::vector<std::string>& command) const;
     std::vector<std::string> clusterNodes() const;
 
     CacheStore& cache_;
@@ -32,6 +64,12 @@ private:
     std::string current_node_;
     ClusterSlotMap* slot_map_;
     std::mutex* slot_map_mutex_;
+    AppendOnlyFile* aof_;
+    std::function<void()> cluster_change_callback_;
+    ReplicationBacklog* replication_backlog_;
+    std::atomic<uint64_t>* replication_offset_;
+    std::function<void(uint64_t)> replication_offset_callback_;
+    bool promoted_to_master_ = false;
 };
 
 } // namespace miniredis

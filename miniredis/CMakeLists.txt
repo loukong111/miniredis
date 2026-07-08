@@ -9,6 +9,58 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # 项目通过 option 控制测试维度，实现“开发构建”和“CI 构建”分离。
 option(MINIREDIS_ENABLE_INTEGRATION_TESTS "Enable redis-cli/curl based integration tests" ON)
 option(MINIREDIS_BUILD_QT_CONSOLE "Build the optional Qt demo console" OFF)
+option(MINIREDIS_ENABLE_ASAN "Enable AddressSanitizer" OFF)
+option(MINIREDIS_ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)
+option(MINIREDIS_ENABLE_TSAN "Enable ThreadSanitizer" OFF)
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(MINIREDIS_DEFAULT_BUILD_SERVER ON)
+    set(MINIREDIS_DEFAULT_BUILD_TESTS ON)
+else()
+    set(MINIREDIS_DEFAULT_BUILD_SERVER OFF)
+    set(MINIREDIS_DEFAULT_BUILD_TESTS OFF)
+endif()
+
+option(MINIREDIS_BUILD_SERVER "Build the Linux MiniRedis server" ${MINIREDIS_DEFAULT_BUILD_SERVER})
+option(MINIREDIS_BUILD_TESTS "Build MiniRedis unit/integration tests" ${MINIREDIS_DEFAULT_BUILD_TESTS})
+
+if(MINIREDIS_BUILD_SERVER AND NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    message(FATAL_ERROR
+        "MiniRedis server currently requires Linux because it uses epoll/eventfd/POSIX sockets. "
+        "On Windows/macOS, configure with -DMINIREDIS_BUILD_SERVER=OFF "
+        "and -DMINIREDIS_BUILD_QT_CONSOLE=ON to build the cross-platform Qt console."
+    )
+endif()
+
+if(MINIREDIS_BUILD_TESTS AND NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    message(FATAL_ERROR
+        "MiniRedis tests currently exercise Linux-only server/persistence code. "
+        "Use -DMINIREDIS_BUILD_TESTS=OFF on non-Linux platforms."
+    )
+endif()
+
+if(MINIREDIS_ENABLE_ASAN AND MINIREDIS_ENABLE_TSAN)
+    message(FATAL_ERROR "AddressSanitizer and ThreadSanitizer cannot be enabled together")
+endif()
+
+function(miniredis_apply_sanitizers target_name)
+    if(NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        return()
+    endif()
+
+    if(MINIREDIS_ENABLE_ASAN)
+        target_compile_options(${target_name} PRIVATE -fsanitize=address -fno-omit-frame-pointer)
+        target_link_options(${target_name} PRIVATE -fsanitize=address)
+    endif()
+    if(MINIREDIS_ENABLE_UBSAN)
+        target_compile_options(${target_name} PRIVATE -fsanitize=undefined -fno-omit-frame-pointer)
+        target_link_options(${target_name} PRIVATE -fsanitize=undefined)
+    endif()
+    if(MINIREDIS_ENABLE_TSAN)
+        target_compile_options(${target_name} PRIVATE -fsanitize=thread -fno-omit-frame-pointer)
+        target_link_options(${target_name} PRIVATE -fsanitize=thread)
+    endif()
+endfunction()
 
 find_library(MYSQL_CLIENT_LIB mysqlclient)
 if(MYSQL_CLIENT_LIB)
@@ -21,17 +73,24 @@ endif()
 
 include_directories(${CMAKE_SOURCE_DIR}/include)
 
+if(MINIREDIS_BUILD_SERVER OR MINIREDIS_BUILD_TESTS)
+    find_package(Threads REQUIRED)
+endif()
+
 set(MINIREDIS_LIB_SOURCES
     ${CMAKE_SOURCE_DIR}/src/core/cache_store.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/logger.cpp
     ${CMAKE_SOURCE_DIR}/src/core/memory_pool.cpp
     ${CMAKE_SOURCE_DIR}/src/core/thread_pool.cpp
     ${CMAKE_SOURCE_DIR}/src/net/scheduler.cpp
     ${CMAKE_SOURCE_DIR}/src/net/resp_parser.cpp
     ${CMAKE_SOURCE_DIR}/src/persistence/persistence_manager.cpp
     ${CMAKE_SOURCE_DIR}/src/cluster/slot_map.cpp
+    ${CMAKE_SOURCE_DIR}/src/cluster/cluster_config_store.cpp
     ${CMAKE_SOURCE_DIR}/src/cluster/cluster_utils.cpp
     ${CMAKE_SOURCE_DIR}/src/metrics/stats.cpp
     ${CMAKE_SOURCE_DIR}/src/metrics/http_stats.cpp
+    ${CMAKE_SOURCE_DIR}/src/persistence/append_only_file.cpp
     ${CMAKE_SOURCE_DIR}/src/persistence/file_persistence.cpp
     ${CMAKE_SOURCE_DIR}/src/server/config.cpp
     ${CMAKE_SOURCE_DIR}/src/server/command_handler.cpp
@@ -47,37 +106,47 @@ set(SERVER_SOURCES
     ${MINIREDIS_LIB_SOURCES}
 )
 
-add_executable(miniredis ${SERVER_SOURCES})
+if(MINIREDIS_BUILD_SERVER)
+    add_executable(miniredis ${SERVER_SOURCES})
 
-target_link_libraries(miniredis pthread)
+    target_link_libraries(miniredis Threads::Threads)
+    miniredis_apply_sanitizers(miniredis)
 
-if(HAVE_MYSQL)
-    target_link_libraries(miniredis ${MYSQL_CLIENT_LIB})
-    target_compile_definitions(miniredis PUBLIC HAVE_MYSQL)
+    if(HAVE_MYSQL)
+        target_link_libraries(miniredis ${MYSQL_CLIENT_LIB})
+        target_compile_definitions(miniredis PUBLIC HAVE_MYSQL)
+    endif()
 endif()
 
 if(MINIREDIS_BUILD_QT_CONSOLE)
     add_subdirectory(tools/qt_console)
 endif()
 
-enable_testing()
+if(MINIREDIS_BUILD_TESTS)
+    enable_testing()
 
-add_executable(miniredis_unit_tests
-    ${CMAKE_SOURCE_DIR}/tests/unit_tests.cpp
-    ${CMAKE_SOURCE_DIR}/src/core/cache_store.cpp
-    ${CMAKE_SOURCE_DIR}/src/persistence/file_persistence.cpp
-    ${CMAKE_SOURCE_DIR}/src/core/memory_pool.cpp
-    ${CMAKE_SOURCE_DIR}/src/core/thread_pool.cpp
-    ${CMAKE_SOURCE_DIR}/src/net/resp_parser.cpp
-    ${CMAKE_SOURCE_DIR}/src/cluster/slot_map.cpp
-    ${CMAKE_SOURCE_DIR}/src/cluster/cluster_utils.cpp
-    ${CMAKE_SOURCE_DIR}/src/metrics/stats.cpp
-    ${CMAKE_SOURCE_DIR}/src/server/command_handler.cpp
-)
-target_link_libraries(miniredis_unit_tests pthread)
-add_test(NAME miniredis_unit_tests COMMAND miniredis_unit_tests)
+    add_executable(miniredis_unit_tests
+        ${CMAKE_SOURCE_DIR}/tests/unit_tests.cpp
+        ${CMAKE_SOURCE_DIR}/src/core/cache_store.cpp
+        ${CMAKE_SOURCE_DIR}/src/core/logger.cpp
+        ${CMAKE_SOURCE_DIR}/src/persistence/file_persistence.cpp
+        ${CMAKE_SOURCE_DIR}/src/persistence/append_only_file.cpp
+        ${CMAKE_SOURCE_DIR}/src/core/memory_pool.cpp
+        ${CMAKE_SOURCE_DIR}/src/core/thread_pool.cpp
+        ${CMAKE_SOURCE_DIR}/src/net/resp_parser.cpp
+        ${CMAKE_SOURCE_DIR}/src/cluster/slot_map.cpp
+        ${CMAKE_SOURCE_DIR}/src/cluster/cluster_config_store.cpp
+        ${CMAKE_SOURCE_DIR}/src/cluster/cluster_utils.cpp
+        ${CMAKE_SOURCE_DIR}/src/metrics/stats.cpp
+        ${CMAKE_SOURCE_DIR}/src/server/config.cpp
+        ${CMAKE_SOURCE_DIR}/src/server/command_handler.cpp
+    )
+    target_link_libraries(miniredis_unit_tests Threads::Threads)
+    miniredis_apply_sanitizers(miniredis_unit_tests)
+    add_test(NAME miniredis_unit_tests COMMAND miniredis_unit_tests)
+endif()
 
-if(MINIREDIS_ENABLE_INTEGRATION_TESTS)
+if(MINIREDIS_BUILD_TESTS AND MINIREDIS_ENABLE_INTEGRATION_TESTS AND MINIREDIS_BUILD_SERVER)
     find_program(BASH_PROGRAM bash)
     find_program(REDIS_CLI_PROGRAM redis-cli)
     find_program(CURL_PROGRAM curl)

@@ -7,7 +7,7 @@ services:
       - "6366:6366"
       - "8080:8080"
     environment:
-      MINIREDIS_REQUIREPASS: secret
+      MINIREDIS_REQUIREPASS: ${MINIREDIS_REQUIREPASS:-change-me}
       MINIREDIS_MAX_CLIENTS: "10000"
     volumes:
       - miniredis-data:/var/lib/miniredis
@@ -24,12 +24,14 @@ services:
       - /var/lib/miniredis/snapshot_6366.dat
       - --snapshot-interval
       - "30"
-      - --requirepass
-      - secret
       - --max-clients
       - "10000"
+      - --io-threads
+      - "4"
+      - --cache-shards
+      - "16"
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/readyz"]
       interval: 10s
       timeout: 3s
       retries: 3

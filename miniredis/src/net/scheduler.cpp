@@ -1,10 +1,11 @@
+#include "miniredis/core/logger.hpp"
 #include "miniredis/net/scheduler.hpp"
 #include <unistd.h>
 #include <sys/eventfd.h>
 #include <cassert>
-#include <iostream>
 #include <errno.h>
 #include <cstdint>
+#include <cstring>
 
 namespace miniredis {
 
@@ -15,12 +16,12 @@ void IoAwaitable::await_suspend(std::coroutine_handle<> handle) {
 Scheduler::Scheduler() : epoll_fd_(-1), wake_fd_(-1), running_(false) {
     epoll_fd_ = epoll_create1(0);
     if (epoll_fd_ == -1) {
-        perror("epoll_create1");
+        MINIREDIS_LOG_ERROR("scheduler") << "epoll_create1 failed: " << std::strerror(errno);
         exit(1);
     }
     wake_fd_ = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     if (wake_fd_ == -1) {
-        perror("eventfd");
+        MINIREDIS_LOG_ERROR("scheduler") << "eventfd failed: " << std::strerror(errno);
         close(epoll_fd_);
         exit(1);
     }
@@ -28,7 +29,7 @@ Scheduler::Scheduler() : epoll_fd_(-1), wake_fd_(-1), running_(false) {
     ev.events = EPOLLIN;
     ev.data.fd = wake_fd_;
     if (epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, wake_fd_, &ev) == -1) {
-        perror("epoll_ctl wake_fd");
+        MINIREDIS_LOG_ERROR("scheduler") << "epoll_ctl wake_fd failed: " << std::strerror(errno);
         close(wake_fd_);
         close(epoll_fd_);
         exit(1);
@@ -87,10 +88,10 @@ void Scheduler::add_fd(int fd, uint32_t events, std::coroutine_handle<> handle) 
         if (errno == ENOENT) {
             // 不存在，添加
             if (epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, fd, &ev) == -1) {
-                perror("epoll_ctl add");
+                MINIREDIS_LOG_WARN("scheduler") << "epoll_ctl add failed: " << std::strerror(errno);
             }
         } else {
-            perror("epoll_ctl mod");
+            MINIREDIS_LOG_WARN("scheduler") << "epoll_ctl mod failed: " << std::strerror(errno);
         }
     }
 }
@@ -119,7 +120,7 @@ void Scheduler::run_loop() {
         int nfds = epoll_wait(epoll_fd_, events, MAX_EVENTS, -1);
         if (nfds == -1) {
             if (errno == EINTR) continue;
-            perror("epoll_wait");
+            MINIREDIS_LOG_ERROR("scheduler") << "epoll_wait failed: " << std::strerror(errno);
             break;
         }
         handle_events(epoll_fd_, events, nfds);
@@ -150,10 +151,20 @@ void Scheduler::run_ready_tasks() {
 }
 
 void Scheduler::cleanup_completed_tasks() {
-    std::lock_guard<std::mutex> lock(task_mutex_);
-    for (auto it = tasks_.begin(); it != tasks_.end(); ) {
-        if (it->done()) it = tasks_.erase(it);
-        else ++it;
+    std::vector<Task> active;
+    std::vector<Task> completed;
+    {
+        std::lock_guard<std::mutex> lock(task_mutex_);
+        active.reserve(tasks_.size());
+        completed.reserve(tasks_.size());
+        for (auto& task : tasks_) {
+            if (task.done()) {
+                completed.push_back(std::move(task));
+            } else {
+                active.push_back(std::move(task));
+            }
+        }
+        tasks_.swap(active);
     }
 }
 

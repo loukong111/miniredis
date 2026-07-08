@@ -47,7 +47,7 @@ struct Task {
         return *this;
     }
     void resume() { if (handle) handle.resume(); }
-    bool done() const { return handle.done(); }
+    bool done() const { return !handle || handle.done(); }
 };
 
 class Scheduler {

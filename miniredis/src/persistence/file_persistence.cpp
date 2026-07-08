@@ -1,19 +1,21 @@
 #include "miniredis/persistence/file_persistence.hpp"
+#include "miniredis/core/logger.hpp"
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
 #include <fcntl.h>
-#include <iostream>
 #include <limits>
 #include <string>
+#include <filesystem>
 #include <sys/stat.h>
 #include <unistd.h>
 
 namespace miniredis {
 namespace {
 
-constexpr const char* kSnapshotMagic = "MINIREDIS_SNAPSHOT_V1";
+constexpr const char* kSnapshotMagicV1 = "MINIREDIS_SNAPSHOT_V1";
+constexpr const char* kSnapshotMagicV2 = "MINIREDIS_SNAPSHOT_V2";
 constexpr uint64_t kMaxEntrySize = 512ULL * 1024ULL * 1024ULL;
 constexpr uint64_t kMaxSnapshotEntries = 1'000'000ULL;
 
@@ -30,21 +32,67 @@ bool readU64(std::istream& is, uint64_t& value) {
 bool fsyncFile(const std::string& path) {
     int fd = ::open(path.c_str(), O_RDONLY);
     if (fd < 0) {
-        std::cerr << "Failed to open snapshot for fsync: " << path
-                  << " error=" << std::strerror(errno) << std::endl;
+        MINIREDIS_LOG_ERROR("snapshot") << "failed to open snapshot for fsync: "
+                                        << path << " error=" << std::strerror(errno);
         return false;
     }
     bool ok = (::fsync(fd) == 0);
     if (!ok) {
-        std::cerr << "fsync failed for snapshot: " << path
-                  << " error=" << std::strerror(errno) << std::endl;
+        MINIREDIS_LOG_ERROR("snapshot") << "fsync failed for snapshot: "
+                                        << path << " error=" << std::strerror(errno);
     }
     ::close(fd);
     return ok;
 }
 
+bool fsyncParentDirectory(const std::string& path) {
+    std::filesystem::path parent = std::filesystem::path(path).parent_path();
+    if (parent.empty()) {
+        parent = ".";
+    }
+
+    int fd = ::open(parent.string().c_str(), O_RDONLY | O_DIRECTORY);
+    if (fd < 0) {
+        MINIREDIS_LOG_WARN("snapshot") << "failed to open snapshot parent directory for fsync: "
+                                       << parent.string() << " error=" << std::strerror(errno);
+        return false;
+    }
+    bool ok = (::fsync(fd) == 0);
+    if (!ok) {
+        MINIREDIS_LOG_WARN("snapshot") << "fsync failed for snapshot parent directory: "
+                                       << parent.string() << " error=" << std::strerror(errno);
+    }
+    ::close(fd);
+    return ok;
+}
+
+std::string badSnapshotPath(const std::string& path) {
+    return path + ".bad";
+}
+
+std::string backupSnapshotPath(const std::string& path) {
+    return path + ".bak";
+}
+
+void markBadSnapshot(const std::string& path) {
+    if (!std::filesystem::exists(path)) return;
+
+    const std::string bad_path = badSnapshotPath(path);
+    std::error_code ec;
+    std::filesystem::remove(bad_path, ec);
+    ec.clear();
+    std::filesystem::rename(path, bad_path, ec);
+    if (ec) {
+        MINIREDIS_LOG_WARN("snapshot") << "failed to move bad snapshot " << path
+                                       << " to " << bad_path << ": " << ec.message();
+        return;
+    }
+    fsyncParentDirectory(path);
+    MINIREDIS_LOG_WARN("snapshot") << "moved bad snapshot to " << bad_path;
+}
+
 bool loadLegacyTextSnapshot(const std::string& path,
-                            std::unordered_map<std::string, std::string>& out) {
+                            SnapshotData& out) {
     std::ifstream ifs(path);
     if (!ifs) return false;
 
@@ -54,76 +102,19 @@ bool loadLegacyTextSnapshot(const std::string& path,
         if (line.empty()) continue;
         size_t space = line.find(' ');
         if (space == std::string::npos) {
-            std::cerr << "Invalid legacy snapshot line: " << line << std::endl;
+            MINIREDIS_LOG_WARN("snapshot") << "invalid legacy snapshot line: " << line;
             continue;
         }
-        out[line.substr(0, space)] = line.substr(space + 1);
+        out[line.substr(0, space)] = SnapshotEntry{line.substr(space + 1), 0};
         ++count;
     }
-    std::cout << "[FilePersistence] Loaded legacy snapshot with " << count
-              << " keys from " << path << std::endl;
+    MINIREDIS_LOG_INFO("snapshot") << "loaded legacy snapshot with " << count
+                                   << " keys from " << path;
     return true;
 }
 
-} // namespace
-
-FilePersistence::FilePersistence(const std::string& filepath) : filepath_(filepath) {}
-
-bool FilePersistence::saveSnapshot(const std::unordered_map<std::string, std::string>& data) {
-    if (data.size() > kMaxSnapshotEntries) {
-        std::cerr << "Snapshot has too many entries: " << data.size() << std::endl;
-        return false;
-    }
-
-    const std::string tmp_path = filepath_ + ".tmp";
-    {
-        std::ofstream ofs(tmp_path, std::ios::binary | std::ios::trunc);
-        if (!ofs) {
-            std::cerr << "Failed to open snapshot temp file for write: "
-                      << tmp_path << std::endl;
-            return false;
-        }
-
-        ofs << kSnapshotMagic << '\n';
-        if (!writeU64(ofs, static_cast<uint64_t>(data.size()))) {
-            std::cerr << "Failed to write snapshot header: " << tmp_path << std::endl;
-            return false;
-        }
-
-        for (const auto& [key, value] : data) {
-            if (!writeU64(ofs, static_cast<uint64_t>(key.size())) ||
-                !writeU64(ofs, static_cast<uint64_t>(value.size()))) {
-                std::cerr << "Failed to write snapshot entry header" << std::endl;
-                return false;
-            }
-            ofs.write(key.data(), static_cast<std::streamsize>(key.size()));
-            ofs.write(value.data(), static_cast<std::streamsize>(value.size()));
-            if (!ofs) {
-                std::cerr << "Failed to write snapshot entry body" << std::endl;
-                return false;
-            }
-        }
-        ofs.flush();
-        if (!ofs) {
-            std::cerr << "Failed to flush snapshot temp file: " << tmp_path << std::endl;
-            return false;
-        }
-    }
-
-    if (!fsyncFile(tmp_path)) return false;
-    if (::rename(tmp_path.c_str(), filepath_.c_str()) != 0) {
-        std::cerr << "Failed to replace snapshot file: " << filepath_
-                  << " error=" << std::strerror(errno) << std::endl;
-        return false;
-    }
-
-    std::cout << "[FilePersistence] Saved snapshot with " << data.size()
-              << " keys to " << filepath_ << std::endl;
-    return true;
-}
-
-bool FilePersistence::loadSnapshot(std::unordered_map<std::string, std::string>& out) {
-    std::ifstream ifs(filepath_, std::ios::binary);
+bool loadSnapshotFile(const std::string& path, SnapshotData& out) {
+    std::ifstream ifs(path, std::ios::binary);
     if (!ifs) {
         return true;
     }
@@ -132,35 +123,39 @@ bool FilePersistence::loadSnapshot(std::unordered_map<std::string, std::string>&
     if (!std::getline(ifs, magic)) {
         return true;
     }
-    if (magic != kSnapshotMagic) {
+    const bool is_v1 = (magic == kSnapshotMagicV1);
+    const bool is_v2 = (magic == kSnapshotMagicV2);
+    if (!is_v1 && !is_v2) {
         ifs.close();
-        return loadLegacyTextSnapshot(filepath_, out);
+        return loadLegacyTextSnapshot(path, out);
     }
 
     uint64_t count = 0;
     if (!readU64(ifs, count)) {
-        std::cerr << "Invalid snapshot header: " << filepath_ << std::endl;
+        MINIREDIS_LOG_ERROR("snapshot") << "invalid snapshot header: " << path;
         return false;
     }
     if (count > kMaxSnapshotEntries ||
         count > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
-        std::cerr << "Snapshot entry count too large: " << count << std::endl;
+        MINIREDIS_LOG_ERROR("snapshot") << "snapshot entry count too large: " << count;
         return false;
     }
 
-    std::unordered_map<std::string, std::string> loaded;
+    SnapshotData loaded;
     loaded.reserve(static_cast<size_t>(count));
     for (uint64_t i = 0; i < count; ++i) {
         uint64_t key_size = 0;
         uint64_t value_size = 0;
-        if (!readU64(ifs, key_size) || !readU64(ifs, value_size)) {
-            std::cerr << "Invalid snapshot entry header at index " << i << std::endl;
+        uint64_t expire_at_ms = 0;
+        if (!readU64(ifs, key_size) || !readU64(ifs, value_size) ||
+            (is_v2 && !readU64(ifs, expire_at_ms))) {
+            MINIREDIS_LOG_ERROR("snapshot") << "invalid snapshot entry header at index " << i;
             return false;
         }
         if (key_size > kMaxEntrySize || value_size > kMaxEntrySize ||
             key_size > static_cast<uint64_t>(std::numeric_limits<size_t>::max()) ||
             value_size > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
-            std::cerr << "Snapshot entry too large at index " << i << std::endl;
+            MINIREDIS_LOG_ERROR("snapshot") << "snapshot entry too large at index " << i;
             return false;
         }
 
@@ -169,16 +164,103 @@ bool FilePersistence::loadSnapshot(std::unordered_map<std::string, std::string>&
         if (key_size > 0) ifs.read(key.data(), static_cast<std::streamsize>(key.size()));
         if (value_size > 0) ifs.read(value.data(), static_cast<std::streamsize>(value.size()));
         if (!ifs) {
-            std::cerr << "Invalid snapshot entry body at index " << i << std::endl;
+            MINIREDIS_LOG_ERROR("snapshot") << "invalid snapshot entry body at index " << i;
             return false;
         }
-        loaded[std::move(key)] = std::move(value);
+        loaded[std::move(key)] = SnapshotEntry{std::move(value), expire_at_ms};
     }
 
     out = std::move(loaded);
-    std::cout << "[FilePersistence] Loaded snapshot with " << out.size()
-              << " keys from " << filepath_ << std::endl;
+    MINIREDIS_LOG_INFO("snapshot") << "loaded snapshot with " << out.size()
+                                   << " keys from " << path;
     return true;
+}
+
+} // namespace
+
+FilePersistence::FilePersistence(const std::string& filepath) : filepath_(filepath) {}
+
+bool FilePersistence::saveSnapshot(const SnapshotData& data) {
+    if (data.size() > kMaxSnapshotEntries) {
+        MINIREDIS_LOG_ERROR("snapshot") << "snapshot has too many entries: " << data.size();
+        return false;
+    }
+
+    const std::string tmp_path = filepath_ + ".tmp";
+    {
+        std::ofstream ofs(tmp_path, std::ios::binary | std::ios::trunc);
+        if (!ofs) {
+            MINIREDIS_LOG_ERROR("snapshot") << "failed to open snapshot temp file for write: "
+                                            << tmp_path;
+            return false;
+        }
+
+        ofs << kSnapshotMagicV2 << '\n';
+        if (!writeU64(ofs, static_cast<uint64_t>(data.size()))) {
+            MINIREDIS_LOG_ERROR("snapshot") << "failed to write snapshot header: " << tmp_path;
+            return false;
+        }
+
+        for (const auto& [key, entry] : data) {
+            const auto& value = entry.value;
+            if (!writeU64(ofs, static_cast<uint64_t>(key.size())) ||
+                !writeU64(ofs, static_cast<uint64_t>(value.size())) ||
+                !writeU64(ofs, entry.expire_at_ms)) {
+                MINIREDIS_LOG_ERROR("snapshot") << "failed to write snapshot entry header";
+                return false;
+            }
+            ofs.write(key.data(), static_cast<std::streamsize>(key.size()));
+            ofs.write(value.data(), static_cast<std::streamsize>(value.size()));
+            if (!ofs) {
+                MINIREDIS_LOG_ERROR("snapshot") << "failed to write snapshot entry body";
+                return false;
+            }
+        }
+        ofs.flush();
+        if (!ofs) {
+            MINIREDIS_LOG_ERROR("snapshot") << "failed to flush snapshot temp file: " << tmp_path;
+            return false;
+        }
+    }
+
+    if (!fsyncFile(tmp_path)) return false;
+    if (std::filesystem::exists(filepath_)) {
+        std::error_code ec;
+        std::filesystem::copy_file(filepath_, backupSnapshotPath(filepath_),
+                                   std::filesystem::copy_options::overwrite_existing, ec);
+        if (ec) {
+            MINIREDIS_LOG_WARN("snapshot") << "failed to update snapshot backup: " << ec.message();
+        } else {
+            fsyncFile(backupSnapshotPath(filepath_));
+        }
+    }
+    if (::rename(tmp_path.c_str(), filepath_.c_str()) != 0) {
+        MINIREDIS_LOG_ERROR("snapshot") << "failed to replace snapshot file: "
+                                        << filepath_ << " error=" << std::strerror(errno);
+        return false;
+    }
+    fsyncParentDirectory(filepath_);
+
+    MINIREDIS_LOG_INFO("snapshot") << "saved snapshot with " << data.size()
+                                   << " keys to " << filepath_;
+    return true;
+}
+
+bool FilePersistence::loadSnapshot(SnapshotData& out) {
+    if (loadSnapshotFile(filepath_, out)) {
+        return true;
+    }
+
+    markBadSnapshot(filepath_);
+    const std::string backup_path = backupSnapshotPath(filepath_);
+    if (std::filesystem::exists(backup_path)) {
+        MINIREDIS_LOG_WARN("snapshot") << "trying backup snapshot: " << backup_path;
+        if (loadSnapshotFile(backup_path, out)) {
+            return true;
+        }
+        markBadSnapshot(backup_path);
+    }
+    return false;
 }
 
 } // namespace miniredis

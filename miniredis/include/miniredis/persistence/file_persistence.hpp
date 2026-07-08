@@ -1,15 +1,15 @@
 #pragma once
 
+#include "miniredis/core/snapshot.hpp"
 #include <string>
-#include <unordered_map>
 
 namespace miniredis {
 
 class FilePersistence {
 public:
     explicit FilePersistence(const std::string& filepath);
-    bool saveSnapshot(const std::unordered_map<std::string, std::string>& data);
-    bool loadSnapshot(std::unordered_map<std::string, std::string>& out);
+    bool saveSnapshot(const SnapshotData& data);
+    bool loadSnapshot(SnapshotData& out);
 
 private:
     std::string filepath_;

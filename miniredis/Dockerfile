@@ -34,7 +34,7 @@ USER miniredis
 EXPOSE 6366 8080
 
 HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
-    CMD curl -fsS http://127.0.0.1:8080/healthz || exit 1
+    CMD curl -fsS http://127.0.0.1:8080/readyz || exit 1
 
 ENTRYPOINT ["miniredis"]
-CMD ["--bind", "0.0.0.0", "--port", "6366", "--stats-bind", "0.0.0.0", "--stats-port", "8080", "--snapshot-file", "/var/lib/miniredis/snapshot_6366.dat"]
+CMD ["--snapshot-file", "/var/lib/miniredis/snapshot_6366.dat"]
