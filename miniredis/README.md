@@ -5,19 +5,19 @@ MiniRedis 是一个面向本地和内网后台服务的轻量级 KV 缓存中间
 ## 项目亮点
 
 - C++20 coroutine + epoll 多 Reactor 网络模型，accept reactor 分发连接，worker reactor 负责客户端 IO。
-- 支持 RESP 协议和常用命令：`PING`、`AUTH`、`ACL`、`SET`、`SETNX`、`GET`、`MGET`、`APPEND`、`STRLEN`、`INCR/DECR`、`INCRBY/DECRBY`、`DEL`、`EXISTS`、`EXPIRE`、`TTL`、`COMMAND`、`INFO`、`SLOWLOG`、`BGREWRITEAOF`。
+- 支持 RESP 协议和常用 String/KV 命令：`PING`、`AUTH`、`ACL`、`SET/SETNX`、`GET/GETDEL/GETEX`、`MGET`、`APPEND`、`STRLEN`、`TYPE`、`INCR/DECR`、`INCRBY/DECRBY`、`DEL`、`EXISTS`、`EXPIRE/PEXPIRE/PERSIST`、`TTL/PTTL`、`COMMAND`、`INFO`、`SLOWLOG`、`BGREWRITEAOF`。
 - CacheStore 按 key hash 分片，结合 `std::shared_mutex` 降低多客户端读写锁竞争。
 - 64B 固定块内存池复用小 value，大 value 走堆分配。
 - 支持 TTL、惰性删除、后台 cleanup、`maxmemory` 和 `noeviction/lru` 淘汰策略。
 - 支持 TTL-aware 二进制 snapshot、AOF 增量日志、AOF rewrite、坏尾恢复、rewrite 失败重试和损坏 snapshot 回退。
 - 提供 `/healthz`、`/readyz`、`/stats` 和 Prometheus `/metrics`，暴露连接、延迟、资源限制、snapshot、AOF rewrite 等指标。
-- 支持 AUTH、轻量 ACL、安全默认 bind、连接数限制、请求大小限制、优雅停机、Docker 和 systemd 部署示例。
+- 支持 AUTH、轻量 ACL 用户、命令权限、key 前缀权限、安全默认 bind、连接数限制、请求大小限制、优雅停机、Docker 和 systemd 部署示例。
 - 提供简化 replication、轻量 replication backlog/PSYNC 增量同步、experimental Redis Cluster 风格 slot 路由、`MOVED/ASK`、slot 迁移和手动 failover takeover。
 - 提供 Qt Console，可视化演示命令编辑、Demo Lab、服务启停、Replication、Cluster、Diagnostics、Observability、Metrics 和 Benchmark。
 
-## 跨平台定位
+## 平台定位
 
-MiniRedis 采用 Linux-first 服务端设计：服务端网络层使用 `epoll/eventfd/POSIX socket`，面向 Linux 内网服务器部署；Qt Console 作为管理和演示端，通过 RESP/HTTP 连接服务端，适合做跨平台客户端。
+MiniRedis 服务端面向 Linux 内网服务器部署，网络层使用 `epoll/eventfd/POSIX socket`；Qt Console 是跨平台管理端，通过 RESP/HTTP 连接本地、远程或 Docker 中的服务端。
 
 | 模块 | Linux | Windows | macOS |
 |---|---:|---:|---:|
@@ -29,8 +29,11 @@ MiniRedis 采用 Linux-first 服务端设计：服务端网络层使用 `epoll/e
 构建边界：
 
 - Linux 默认构建服务端和测试。
+- Windows/macOS 推荐通过 Docker 运行服务端，或连接远程 Linux 服务端。
 - 非 Linux 默认关闭服务端和测试；如需构建 Qt Console，使用 `-DMINIREDIS_BUILD_QT_CONSOLE=ON`。
 - 如果在 Windows/macOS 强制开启 `MINIREDIS_BUILD_SERVER=ON`，CMake 会给出明确错误提示。
+
+详细平台边界见 [docs/platform.md](docs/platform.md)。
 
 ## 快速开始
 
@@ -69,7 +72,7 @@ Qt Console 是项目的可视化演示入口，尽量减少对终端命令的依
 - Console：提供资源树、多行命令编辑器、命令模板、历史记录、执行输出、错误提示、运行摘要和命令参考。
 - Demo Lab：一键演示 Replication/PSYNC、AOF Recovery 和 Cluster 故障观察流程，尽量减少终端依赖。
 - Server：启动单节点、master/replica、三节点 cluster，配置 AOF、maxmemory、IO threads、cache shards 等参数。
-- Cluster Routing：查询 `CLUSTER INFO/NODES/SLOTS/SLOTMAP`，演示 `MOVED/ASK`、slot 迁移和节点故障。
+- Cluster Routing：查询 `CLUSTER INFO/NODES/SLOTS/SLOTMAP`，演示 `MEET/FORGET`、`MOVED/ASK`、slot 迁移和节点故障。
 - Observability：展示 `/stats` 中的命令数、命中率、连接数、内存、慢日志、资源限制、snapshot 和 AOF rewrite 状态。
 - Diagnostics：触发 `/healthz`、`/readyz`、`INFO`、`ACL`、`SLOWLOG` 等排障入口。
 - Benchmark：调用 `redis-benchmark` 和 `scripts/benchmark.sh` 输出 QPS 与延迟数据。
@@ -137,6 +140,7 @@ scripts/recovery_soak.sh
 ## 文档导航
 
 - [使用与部署](docs/usage.md)
+- [平台支持](docs/platform.md)
 - [架构与持久化](docs/architecture.md)
 - [并发模型与安全性](docs/concurrency.md)
 - [复制机制](docs/replication.md)
@@ -147,10 +151,9 @@ scripts/recovery_soak.sh
 
 ## 当前限制
 
-- 只实现 Redis 命令子集，不兼容完整 Redis 协议和全部数据结构。
-- ACL 是轻量角色模型，不兼容完整 Redis ACL 语法。
+- 聚焦 String/KV 缓存命令，不实现 List/Hash/Set/ZSet 等完整 Redis 数据结构。
+- ACL 支持用户启停、角色、命令白名单/黑名单和 key 前缀限制，但不兼容完整 Redis ACL 语法。
 - 没有 TLS，公网部署需要网关、内网隔离或安全组限制。
-- 服务端当前是 Linux-first 实现，不支持 Windows/macOS 原生服务端；Qt Console 按跨平台管理端设计。
-- AOF rewrite 是轻量线程实现，支持失败状态记录、残留 tmp 清理、buffer 上限保护和重试，不提供 Redis 多进程 rewrite。
+- 原生服务端目标平台是 Linux；Windows/macOS 推荐通过 Docker 或远程 Linux 服务端配合 Qt Console 使用。
 - Replication 支持启动全量同步、轻量 backlog 增量同步、后续异步转发和手动 failover takeover，不提供完整 Redis PSYNC2、复制积压缓冲持久化和自动选主。
-- Cluster 模式仍是 experimental，slot 迁移和 failover 为简化实现，不提供完整 Redis Cluster gossip、投票和一致性协议。
+- Cluster 模式面向手动运维和演示场景，支持拓扑维护、slot 迁移和手动 takeover，不提供完整 Redis Cluster gossip、投票和一致性协议。

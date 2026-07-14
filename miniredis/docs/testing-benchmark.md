@@ -30,11 +30,11 @@ ctest --test-dir build --output-on-failure
 
 - 启动带 AUTH 的服务
 - 验证未认证请求被拒绝
-- 验证 `SET`、`SETNX`、`SET EX`、`GET`、`MGET`、`APPEND`、`STRLEN`、`INCR/DECR`、`DEL`、`EXISTS`、`EXPIRE`、`TTL`、`INFO`、`SLOWLOG`
+- 验证 `SET`、`SETNX`、`SET EX`、`GET`、`GETDEL`、`GETEX`、`MGET`、`APPEND`、`STRLEN`、`TYPE`、`INCR/DECR`、`DEL`、`EXISTS`、`EXPIRE/PEXPIRE`、`PERSIST`、`TTL/PTTL`、`INFO`、`SLOWLOG`
 - 查询 `/healthz`、`/readyz`、`/stats` 和 `/metrics`，验证资源限制、snapshot 和 AOF rewrite 指标暴露
 - 停服后重启，验证快照恢复
 - 启动单节点 cluster 模式
-- 验证 `CLUSTER INFO`、`CLUSTER NODES`、`CLUSTER MYID`、`CLUSTER KEYSLOT`、`CLUSTER COUNTKEYSINSLOT`、`CLUSTER SLOTS`、`CLUSTER SLOTMAP`
+- 验证 `CLUSTER INFO`、`CLUSTER NODES`、`CLUSTER MYID`、`CLUSTER KEYSLOT`、`CLUSTER COUNTKEYSINSLOT`、`CLUSTER SLOTS`、`CLUSTER SLOTMAP`、`CLUSTER MEET/FORGET`
 - 验证 cluster 模式下基础 `SET/GET`
 
 三节点 cluster demo 还提供独立 smoke：
@@ -58,11 +58,11 @@ scripts/replica_demo.sh smoke
 - maxmemory noeviction / lru 淘汰策略
 - TTL-aware 二进制快照读写、V1 快照兼容、异常 entry count 拒绝加载
 - AOF 增量日志 replay、坏尾忽略、rewrite 中断残留文件清理、rewrite buffer 超限重试、二进制 value、TTL 绝对过期时间和命令层写 AOF
-- AUTH 未认证拒绝、错误密码拒绝、正确密码放行，以及 ACL readonly/readwrite/admin 权限控制和 `ACL WHOAMI/LIST`
+- AUTH 未认证拒绝、错误密码拒绝、正确密码放行，以及 ACL readonly/readwrite/admin、用户启停、命令白名单/黑名单、key 前缀权限和 `ACL WHOAMI/LIST/GETUSER`
 - key/value 大小限制、资源保护配置解析和监控导出
-- `SETNX`、`APPEND`、`STRLEN`、`INCR/DECR`、`SET EX`、`EXPIRE`、`TTL`、`MGET`、`INFO`、`SLOWLOG` 和 COMMAND 元信息响应
+- `SETNX`、`APPEND`、`STRLEN`、`TYPE`、`INCR/DECR`、`GETDEL`、`GETEX`、`SET EX`、`EXPIRE/PEXPIRE`、`PERSIST`、`TTL/PTTL`、`MGET`、`INFO`、`SLOWLOG` 和 COMMAND 元信息响应
 - 简化主从复制的全量快照响应、backlog/PSYNC 增量同步、内部复制命令、replica 只读保护和 `INFO replication`
-- Redis Cluster hash slot、固定 slot 映射表、MOVED/ASK 统计、slot 路由一致性、`SETSLOT` 状态切换和手动 failover takeover
+- Redis Cluster hash slot、固定 slot 映射表、MOVED/ASK 统计、slot 路由一致性、`MEET/FORGET` 拓扑维护、`SETSLOT` 状态切换和手动 failover takeover
 - 动态线程池 stop 后拒绝继续提交任务
 
 ## 性能压测

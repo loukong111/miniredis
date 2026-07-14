@@ -162,6 +162,49 @@ void ClusterSlotMap::clear() {
     ++epoch_;
 }
 
+bool ClusterSlotMap::AddNode(const std::string& node) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (node.empty()) return false;
+    if (std::find(nodes_.begin(), nodes_.end(), node) != nodes_.end()) {
+        auto it = node_states_.find(node);
+        if (it == node_states_.end()) {
+            node_states_[node] = ClusterNodeState::Healthy;
+            ++epoch_;
+        } else if (it->second != ClusterNodeState::Healthy) {
+            it->second = ClusterNodeState::Healthy;
+            ++epoch_;
+        }
+        return true;
+    }
+    nodes_.push_back(node);
+    node_states_[node] = ClusterNodeState::Healthy;
+    ++epoch_;
+    return true;
+}
+
+bool ClusterSlotMap::NodeOwnsSlots(const std::string& node) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return std::find(slot_owner_.begin(), slot_owner_.end(), node) != slot_owner_.end();
+}
+
+bool ClusterSlotMap::RemoveNode(const std::string& node) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = std::find(nodes_.begin(), nodes_.end(), node);
+    if (it == nodes_.end()) return false;
+    if (std::find(slot_owner_.begin(), slot_owner_.end(), node) != slot_owner_.end()) {
+        return false;
+    }
+    nodes_.erase(it);
+    node_states_.erase(node);
+    for (auto& meta : slot_meta_) {
+        if (meta.peer_node == node) {
+            meta = ClusterSlotMeta{};
+        }
+    }
+    ++epoch_;
+    return true;
+}
+
 std::string ClusterSlotMap::GetNodeForSlot(uint16_t slot) const {
     std::lock_guard<std::mutex> lock(mutex_);
     if (slot >= kRedisClusterSlots) return "";

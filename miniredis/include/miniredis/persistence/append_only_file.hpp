@@ -34,6 +34,7 @@ public:
     bool appendSet(const std::string& key, const std::string& value, int ttl_seconds);
     bool appendDel(const std::vector<std::string>& keys);
     bool appendExpire(const std::string& key, int ttl_seconds);
+    bool appendPExpire(const std::string& key, int64_t ttl_ms);
 
     bool replay(SnapshotData& data) const;
     bool rewrite(const SnapshotData& data);

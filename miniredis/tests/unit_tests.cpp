@@ -170,6 +170,7 @@ static void testConfigFileParsingAndPrecedence() {
         ofs << "requirepass = from-file\n";
         ofs << "acl_user = reader:reader-pass:readonly\n";
         ofs << "user = writer password=writer-pass role=readwrite\n";
+        ofs << "user = tenant password=tenant-pass role=readwrite commands=get,set,-del keys=tenant:* enabled=true\n";
         ofs << "max_request_bytes = 11111\n";
         ofs << "max_key_bytes = 64\n";
         ofs << "max_value_bytes = 22222\n";
@@ -221,13 +222,25 @@ static void testConfigFileParsingAndPrecedence() {
     assert(config.replicaof == "127.0.0.1:7000");
     assert(config.replicas_str == "127.0.0.1:7001,127.0.0.1:7002");
     assert(config.requirepass == "from-cli");
-    assert(config.acl_users.size() == 3);
+    assert(config.acl_users.size() == 4);
     assert(config.acl_users[0].username == "reader");
     assert(config.acl_users[0].role == AclRole::ReadOnly);
     assert(config.acl_users[1].username == "writer");
     assert(config.acl_users[1].role == AclRole::ReadWrite);
-    assert(config.acl_users[2].username == "admin");
-    assert(config.acl_users[2].role == AclRole::Admin);
+    assert(config.acl_users[2].username == "tenant");
+    assert(config.acl_users[2].role == AclRole::ReadWrite);
+    assert(config.acl_users[2].enabled);
+    assert(config.acl_users[2].command_allowlist_enabled);
+    assert(config.acl_users[2].allowed_commands.size() == 2);
+    assert(config.acl_users[2].allowed_commands[0] == "GET");
+    assert(config.acl_users[2].allowed_commands[1] == "SET");
+    assert(config.acl_users[2].denied_commands.size() == 1);
+    assert(config.acl_users[2].denied_commands[0] == "DEL");
+    assert(!config.acl_users[2].all_keys);
+    assert(config.acl_users[2].key_prefixes.size() == 1);
+    assert(config.acl_users[2].key_prefixes[0] == "tenant:");
+    assert(config.acl_users[3].username == "admin");
+    assert(config.acl_users[3].role == AclRole::Admin);
     assert(config.max_request_bytes == 11111);
     assert(config.max_key_bytes == 128);
     assert(config.max_value_bytes == 44444);
@@ -843,6 +856,13 @@ static void testClusterSlotMap() {
     assert(slot_map.SetSlotOwner(0, "127.0.0.1:6367"));
     assert(slot_map.GetNodeForSlot(0) == "127.0.0.1:6367");
     assert(slot_map.GetSlotMeta(0).state == ClusterSlotState::Stable);
+    assert(slot_map.AddNode("127.0.0.1:6368"));
+    assert(slot_map.GetEpoch() == 7);
+    assert(!slot_map.NodeOwnsSlots("127.0.0.1:6368"));
+    assert(slot_map.RemoveNode("127.0.0.1:6368"));
+    assert(slot_map.GetEpoch() == 8);
+    assert(slot_map.NodeOwnsSlots("127.0.0.1:6367"));
+    assert(!slot_map.RemoveNode("127.0.0.1:6367"));
 
     ClusterSlotMapSnapshot snapshot = slot_map.ExportSnapshot();
     ClusterSlotMap restored;
@@ -987,6 +1007,23 @@ static void testClusterCommands() {
     assert(parsed->array[0].array[1].integer == 8191);
     assert(parsed->array[0].array[2].array[0].str == "127.0.0.1");
     assert(parsed->array[0].array[2].array[1].integer == 6366);
+
+    assert(handler.handle(command({"CLUSTER", "MEET", "127.0.0.1:6368"}), authenticated) ==
+           RespWriter::simpleString("OK"));
+    std::string meet_info = handler.handle(command({"CLUSTER", "INFO"}), authenticated);
+    assert(meet_info.find("cluster_known_nodes:3") != std::string::npos);
+    std::string meet_nodes = handler.handle(command({"CLUSTER", "NODES"}), authenticated);
+    assert(meet_nodes.find("127.0.0.1:6368") != std::string::npos);
+    assert(handler.handle(command({"CLUSTER", "FORGET", "127.0.0.1:6367"}), authenticated) ==
+           RespWriter::error("node still owns slots; migrate or reassign slots first"));
+    assert(handler.handle(command({"CLUSTER", "FORGET", "127.0.0.1:6368"}), authenticated) ==
+           RespWriter::simpleString("OK"));
+    std::string forget_info = handler.handle(command({"CLUSTER", "INFO"}), authenticated);
+    assert(forget_info.find("cluster_known_nodes:2") != std::string::npos);
+    assert(handler.handle(command({"CLUSTER", "FORGET", "127.0.0.1:6366"}), authenticated) ==
+           RespWriter::error("cannot forget myself"));
+    assert(handler.handle(command({"CLUSTER", "MEET", "not-a-node"}), authenticated) ==
+           RespWriter::error("invalid node address"));
 }
 
 static void testClusterManualFailoverTakeover() {
@@ -1199,6 +1236,22 @@ static void testAclRoles() {
     config.acl_users.push_back(AclUser{"reader", "reader-pass", AclRole::ReadOnly});
     config.acl_users.push_back(AclUser{"writer", "writer-pass", AclRole::ReadWrite});
     config.acl_users.push_back(AclUser{"admin", "admin-pass", AclRole::Admin});
+    AclUser tenant;
+    tenant.username = "tenant";
+    tenant.password = "tenant-pass";
+    tenant.role = AclRole::ReadWrite;
+    tenant.command_allowlist_enabled = true;
+    tenant.allowed_commands = {"GET", "SET", "ACL"};
+    tenant.denied_commands = {"DEL"};
+    tenant.all_keys = false;
+    tenant.key_prefixes = {"tenant:"};
+    config.acl_users.push_back(tenant);
+    AclUser disabled;
+    disabled.username = "disabled";
+    disabled.password = "disabled-pass";
+    disabled.role = AclRole::Admin;
+    disabled.enabled = false;
+    config.acl_users.push_back(disabled);
     CommandHandler handler(cache, pool, config, false, "127.0.0.1:6366", nullptr, nullptr);
 
     CommandSession session;
@@ -1240,12 +1293,36 @@ static void testAclRoles() {
            RespWriter::simpleString("OK"));
     assert(session.role == AclRole::Admin);
     std::string acl_list = handler.handle(command({"ACL", "LIST"}), session);
-    assert(acl_list.find("reader role=readonly password=*****") != std::string::npos);
-    assert(acl_list.find("writer role=readwrite password=*****") != std::string::npos);
-    assert(acl_list.find("admin role=admin password=*****") != std::string::npos);
+    assert(acl_list.find("reader on role=readonly commands=all keys=* password=*****") != std::string::npos);
+    assert(acl_list.find("writer on role=readwrite commands=all keys=* password=*****") != std::string::npos);
+    assert(acl_list.find("admin on role=admin commands=all keys=* password=*****") != std::string::npos);
+    assert(acl_list.find("tenant on role=readwrite commands=+GET,+SET,+ACL,-DEL keys=tenant:* password=*****") != std::string::npos);
+    assert(acl_list.find("disabled off role=admin commands=all keys=* password=*****") != std::string::npos);
     assert(acl_list.find("reader-pass") == std::string::npos);
+    std::string tenant_info = handler.handle(command({"ACL", "GETUSER", "tenant"}), session);
+    assert(tenant_info.find("tenant") != std::string::npos);
+    assert(tenant_info.find("+GET,+SET,+ACL,-DEL") != std::string::npos);
     assert(handler.handle(command({"BGREWRITEAOF"}), session) ==
            RespWriter::error("AOF is not enabled"));
+
+    CommandSession tenant_session;
+    assert(handler.handle(command({"AUTH", "tenant", "tenant-pass"}), tenant_session) ==
+           RespWriter::simpleString("OK"));
+    assert(handler.handle(command({"SET", "tenant:item", "ok"}), tenant_session) ==
+           RespWriter::simpleString("OK"));
+    assert(handler.handle(command({"GET", "tenant:item"}), tenant_session) ==
+           RespWriter::bulkString("ok"));
+    assert(handler.handle(command({"SET", "other:item", "bad"}), tenant_session) ==
+           RespWriter::error("NOPERM this user has no permissions to run the command"));
+    assert(handler.handle(command({"DEL", "tenant:item"}), tenant_session) ==
+           RespWriter::error("NOPERM this user has no permissions to run the command"));
+    assert(handler.handle(command({"INFO"}), tenant_session) ==
+           RespWriter::error("NOPERM this user has no permissions to run the command"));
+
+    CommandSession disabled_session;
+    assert(handler.handle(command({"AUTH", "disabled", "disabled-pass"}), disabled_session) ==
+           RespWriter::error("invalid password"));
+    assert(!disabled_session.authenticated);
 }
 
 static void testCommandResourceLimits() {
@@ -1373,6 +1450,36 @@ static void testCommandStringOps() {
     assert(handler.handle(command({"APPEND", "ttl-key", "d"}), authenticated) == ":4\r\n");
     std::string ttl_response = handler.handle(command({"TTL", "ttl-key"}), authenticated);
     assert(ttl_response == ":9\r\n" || ttl_response == ":10\r\n");
+
+    assert(handler.handle(command({"TYPE", "ttl-key"}), authenticated) ==
+           RespWriter::simpleString("string"));
+    assert(handler.handle(command({"TYPE", "missing"}), authenticated) ==
+           RespWriter::simpleString("none"));
+    assert(handler.handle(command({"PTTL", "ttl-key"}), authenticated) != ":-1\r\n");
+    assert(handler.handle(command({"PERSIST", "ttl-key"}), authenticated) == ":1\r\n");
+    assert(handler.handle(command({"TTL", "ttl-key"}), authenticated) == ":-1\r\n");
+    assert(handler.handle(command({"PERSIST", "ttl-key"}), authenticated) == ":0\r\n");
+
+    assert(handler.handle(command({"PEXPIRE", "ttl-key", "1500"}), authenticated) == ":1\r\n");
+    std::string pttl_response = handler.handle(command({"PTTL", "ttl-key"}), authenticated);
+    long long pttl = std::stoll(pttl_response.substr(1, pttl_response.size() - 3));
+    assert(pttl > 0 && pttl <= 1500);
+
+    assert(handler.handle(command({"GETEX", "ttl-key", "PERSIST"}), authenticated) ==
+           RespWriter::bulkString("abcd"));
+    assert(handler.handle(command({"TTL", "ttl-key"}), authenticated) == ":-1\r\n");
+    assert(handler.handle(command({"GETEX", "ttl-key", "PX", "1200"}), authenticated) ==
+           RespWriter::bulkString("abcd"));
+    pttl_response = handler.handle(command({"PTTL", "ttl-key"}), authenticated);
+    pttl = std::stoll(pttl_response.substr(1, pttl_response.size() - 3));
+    assert(pttl > 0 && pttl <= 1200);
+
+    assert(handler.handle(command({"GETDEL", "ttl-key"}), authenticated) ==
+           RespWriter::bulkString("abcd"));
+    assert(handler.handle(command({"GET", "ttl-key"}), authenticated) ==
+           RespWriter::nullBulkString());
+    assert(handler.handle(command({"GETDEL", "ttl-key"}), authenticated) ==
+           RespWriter::nullBulkString());
 }
 
 static void testCommandSetMaxmemoryOom() {
@@ -1592,7 +1699,7 @@ static void testCommandMetadata() {
     bool authenticated = true;
 
     std::string count_response = handler.handle(command({"COMMAND", "COUNT"}), authenticated);
-    assert(count_response == ":27\r\n");
+    assert(count_response == ":33\r\n");
 
     std::string table_response = handler.handle(command({"COMMAND"}), authenticated);
     RespDecoder decoder;
@@ -1600,13 +1707,16 @@ static void testCommandMetadata() {
     auto parsed = decoder.parse();
     assert(parsed.has_value());
     assert(parsed->type == RespType::ARRAY);
-    assert(parsed->array.size() == 27);
+    assert(parsed->array.size() == 33);
 
     bool saw_acl = false;
     bool saw_asking = false;
     bool saw_set = false;
+    bool saw_getdel = false;
+    bool saw_getex = false;
     bool saw_setnx = false;
     bool saw_strlen = false;
+    bool saw_type = false;
     bool saw_append = false;
     bool saw_incr = false;
     bool saw_decr = false;
@@ -1614,7 +1724,10 @@ static void testCommandMetadata() {
     bool saw_decrby = false;
     bool saw_mget = false;
     bool saw_expire = false;
+    bool saw_pexpire = false;
+    bool saw_persist = false;
     bool saw_ttl = false;
+    bool saw_pttl = false;
     bool saw_info = false;
     bool saw_slowlog = false;
     bool saw_cluster = false;
@@ -1642,8 +1755,20 @@ static void testCommandMetadata() {
             assert(entry.array[3].integer == 1);
             assert(entry.array[4].integer == 1);
         }
+        if (entry.array[0].str == "getdel") {
+            saw_getdel = true;
+            assert(entry.array[1].integer == 2);
+        }
+        if (entry.array[0].str == "getex") {
+            saw_getex = true;
+            assert(entry.array[1].integer == -2);
+        }
         if (entry.array[0].str == "strlen") {
             saw_strlen = true;
+            assert(entry.array[1].integer == 2);
+        }
+        if (entry.array[0].str == "type") {
+            saw_type = true;
             assert(entry.array[1].integer == 2);
         }
         if (entry.array[0].str == "append") {
@@ -1684,6 +1809,18 @@ static void testCommandMetadata() {
             assert(entry.array[3].integer == 1);
             assert(entry.array[4].integer == 1);
         }
+        if (entry.array[0].str == "pexpire") {
+            saw_pexpire = true;
+            assert(entry.array[1].integer == 3);
+        }
+        if (entry.array[0].str == "persist") {
+            saw_persist = true;
+            assert(entry.array[1].integer == 2);
+        }
+        if (entry.array[0].str == "pttl") {
+            saw_pttl = true;
+            assert(entry.array[1].integer == 2);
+        }
         if (entry.array[0].str == "cluster") {
             saw_cluster = true;
         }
@@ -1699,8 +1836,11 @@ static void testCommandMetadata() {
     assert(saw_acl);
     assert(saw_asking);
     assert(saw_set);
+    assert(saw_getdel);
+    assert(saw_getex);
     assert(saw_setnx);
     assert(saw_strlen);
+    assert(saw_type);
     assert(saw_append);
     assert(saw_incr);
     assert(saw_decr);
@@ -1708,7 +1848,10 @@ static void testCommandMetadata() {
     assert(saw_decrby);
     assert(saw_mget);
     assert(saw_expire);
+    assert(saw_pexpire);
+    assert(saw_persist);
     assert(saw_ttl);
+    assert(saw_pttl);
     assert(saw_info);
     assert(saw_slowlog);
     assert(saw_cluster);

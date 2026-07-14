@@ -105,7 +105,7 @@ run_auth_kv_stats_snapshot_smoke() {
   assert_eq "$("${REDIS_CLI}" -p "${port}" -a secret --raw EXISTS alpha 2>/dev/null)" "1" "exists alpha"
   assert_eq "$("${REDIS_CLI}" -p "${port}" -a secret --raw DEL alpha 2>/dev/null)" "1" "del alpha"
   assert_eq "$("${REDIS_CLI}" -p "${port}" -a secret --raw EXISTS alpha 2>/dev/null)" "0" "exists deleted alpha"
-  assert_eq "$("${REDIS_CLI}" -p "${port}" -a secret --raw COMMAND COUNT 2>/dev/null)" "17" "command count"
+  assert_eq "$("${REDIS_CLI}" -p "${port}" -a secret --raw COMMAND COUNT 2>/dev/null)" "33" "command count"
   local info_memory
   info_memory="$("${REDIS_CLI}" -p "${port}" -a secret --raw INFO memory 2>/dev/null)"
   grep -q '# Memory' <<<"${info_memory}"

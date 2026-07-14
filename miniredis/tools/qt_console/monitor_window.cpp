@@ -531,12 +531,14 @@ bool MonitorWindow::exportScreenshots(const QString& directory) {
             "(integer) 4\n"
             "> GET user:1\n"
             "tom!\n"
+            "> TYPE user:1\n"
+            "string\n"
             "> INCR counter\n"
             "(integer) 1\n"
-            "> EXPIRE user:1 60\n"
+            "> PEXPIRE user:1 60000\n"
             "(integer) 1\n"
-            "> TTL user:1\n"
-            "(integer) 59\n"
+            "> PTTL user:1\n"
+            "(integer) 59872\n"
             "> INFO stats\n"
             "total_commands:12843\n"
             "connected_clients:6\n"
@@ -794,14 +796,21 @@ QWidget* MonitorWindow::buildConsoleTab() {
         "PING",
         "SET key value",
         "GET key",
+        "GETDEL key",
+        "GETEX key EX 60",
         "MGET key1 key2",
         "APPEND key value",
+        "TYPE key",
         "INCR counter",
         "EXPIRE key 60",
+        "PEXPIRE key 1500",
+        "PERSIST key",
         "INFO persistence",
         "INFO replication",
         "CLUSTER INFO",
         "CLUSTER NODES",
+        "CLUSTER MEET host:port",
+        "CLUSTER FORGET host:port",
         "BGREWRITEAOF"
     });
     console_history_combo_ = new QComboBox(page);
@@ -856,12 +865,17 @@ QWidget* MonitorWindow::buildConsoleTab() {
     QTreeWidgetItem* kv = new QTreeWidgetItem(current, {"KV 命令"});
     addTreeCommand(kv, "SET", "SET user:1 tom");
     addTreeCommand(kv, "GET", "GET user:1");
+    addTreeCommand(kv, "GETDEL", "GETDEL user:1");
+    addTreeCommand(kv, "GETEX", "GETEX user:1 EX 60");
     addTreeCommand(kv, "SETNX", "SETNX user:1 tom");
     addTreeCommand(kv, "MGET", "MGET user:1 user:2 missing");
     addTreeCommand(kv, "APPEND", "APPEND user:1 !");
     addTreeCommand(kv, "STRLEN", "STRLEN user:1");
+    addTreeCommand(kv, "TYPE", "TYPE user:1");
     addTreeCommand(kv, "INCR", "INCR counter");
     addTreeCommand(kv, "EXPIRE / TTL", "EXPIRE user:1 60\nTTL user:1");
+    addTreeCommand(kv, "PEXPIRE / PTTL", "PEXPIRE user:1 1500\nPTTL user:1");
+    addTreeCommand(kv, "PERSIST", "PERSIST user:1");
     addTreeCommand(kv, "DEL / EXISTS", "EXISTS user:1\nDEL user:1");
     QTreeWidgetItem* observability = new QTreeWidgetItem(current, {"观测诊断"});
     addTreeCommand(observability, "INFO", "INFO");
@@ -873,6 +887,8 @@ QWidget* MonitorWindow::buildConsoleTab() {
     addTreeCommand(cluster, "CLUSTER NODES", "CLUSTER NODES");
     addTreeCommand(cluster, "CLUSTER SLOTS", "CLUSTER SLOTS");
     addTreeCommand(cluster, "CLUSTER KEYSLOT", "CLUSTER KEYSLOT user:{42}:name");
+    addTreeCommand(cluster, "CLUSTER MEET", "CLUSTER MEET 127.0.0.1:6368");
+    addTreeCommand(cluster, "CLUSTER FORGET", "CLUSTER FORGET 127.0.0.1:6368");
     addTreeCommand(cluster, "CLUSTER MIGRATE", "CLUSTER MIGRATE 42 127.0.0.1:6367");
     QTreeWidgetItem* acl = new QTreeWidgetItem(current, {"认证 / ACL"});
     addTreeCommand(acl, "AUTH", "AUTH change-me");
@@ -943,12 +959,14 @@ QWidget* MonitorWindow::buildConsoleTab() {
         "AUTH 密码 | AUTH 用户 密码\n"
         "SET key value [EX 秒数]\n"
         "SETNX key value\n"
-        "GET key | MGET key [key ...]\n"
-        "APPEND key value | STRLEN key\n"
+        "GET key | GETDEL key | GETEX key EX 秒数\n"
+        "MGET key [key ...]\n"
+        "APPEND key value | STRLEN key | TYPE key\n"
         "INCR key | DECR key\n"
         "INCRBY key n | DECRBY key n\n"
         "DEL key [key ...] | EXISTS key [key ...]\n"
-        "EXPIRE key 秒数 | TTL key\n\n"
+        "EXPIRE key 秒数 | PEXPIRE key 毫秒\n"
+        "TTL key | PTTL key | PERSIST key\n\n"
         "诊断与监控\n"
         "INFO [server|clients|memory|stats|persistence|replication|cluster]\n"
         "SLOWLOG LEN | SLOWLOG GET 10 | SLOWLOG RESET\n"
@@ -958,6 +976,7 @@ QWidget* MonitorWindow::buildConsoleTab() {
         "CLUSTER INFO | NODES | SLOTS | SLOTMAP\n"
         "CLUSTER KEYSLOT key\n"
         "CLUSTER COUNTKEYSINSLOT slot\n"
+        "CLUSTER MEET 节点 | FORGET 节点\n"
         "CLUSTER MIGRATE slot 目标节点\n"
         "ASKING");
 

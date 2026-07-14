@@ -67,10 +67,16 @@ redis-cli -p 6366 SETNX foo first
 redis-cli -p 6366 SET temp value EX 30
 redis-cli -p 6366 EXPIRE foo 60
 redis-cli -p 6366 TTL temp
+redis-cli -p 6366 PEXPIRE foo 1500
+redis-cli -p 6366 PTTL foo
+redis-cli -p 6366 PERSIST foo
 redis-cli -p 6366 GET foo
+redis-cli -p 6366 GETEX foo EX 60
+redis-cli -p 6366 GETDEL foo
 redis-cli -p 6366 MGET foo temp missing
 redis-cli -p 6366 APPEND foo !
 redis-cli -p 6366 STRLEN foo
+redis-cli -p 6366 TYPE foo
 redis-cli -p 6366 INCR counter
 redis-cli -p 6366 INCRBY counter 10
 redis-cli -p 6366 INFO memory
@@ -91,27 +97,28 @@ redis-cli -p 6366 -a change-me SET foo bar
 ```bash
 ./build/miniredis \
   --acl-user admin:adminpass:admin \
-  --acl-user app:apppass:readwrite \
+  --acl-user 'app password=apppass role=readwrite commands=get,set,mget,expire,ttl keys=app:*' \
   --acl-user auditor:auditpass:readonly
 
 redis-cli -p 6366 AUTH app apppass
-redis-cli -p 6366 SET foo bar
+redis-cli -p 6366 SET app:foo bar
 redis-cli -p 6366 ACL WHOAMI
 redis-cli -p 6366 AUTH auditor auditpass
-redis-cli -p 6366 GET foo
+redis-cli -p 6366 GET app:foo
 redis-cli -p 6366 AUTH admin adminpass
 redis-cli -p 6366 ACL LIST
+redis-cli -p 6366 ACL GETUSER app
 ```
 
 配置文件也可以写成：
 
 ```text
 user = admin password=adminpass role=admin
-user = app password=apppass role=readwrite
+user = app password=apppass role=readwrite commands=get,set,mget,expire,ttl keys=app:*
 user = auditor password=auditpass role=readonly
 ```
 
-`admin` 可执行所有命令并查看 `ACL LIST`；`readwrite` 可执行基础 KV 读写；`readonly` 只能执行读命令、基础信息查询和 `ACL WHOAMI`。旧版 `--requirepass` / `AUTH password` 仍然兼容。
+`admin` 可执行所有命令并查看 `ACL LIST/GETUSER`；`readwrite` 可执行基础 KV 读写；`readonly` 只能执行读命令、基础信息查询和 `ACL WHOAMI`。`commands=` 可用逗号配置命令白名单，也支持 `-del` 这种显式拒绝；`keys=` 使用前缀匹配，例如 `app:*`。旧版 `--requirepass` / `AUTH password` 仍然兼容。
 
 启用 AOF 增量日志：
 
@@ -173,7 +180,7 @@ redis-cli -p 6366 -a "${MINIREDIS_REQUIREPASS:-change-me}" INFO stats
 --replicaof ip:port       以只读 replica 模式跟随指定 master
 --replicas a:port,b:port  master 侧写命令转发的 replica 列表
 --requirepass password    启用 AUTH
---acl-user user:pass:role 添加 ACL 用户，role=admin|readwrite|readonly，可重复传
+--acl-user spec 添加 ACL 用户，支持 user:pass:role，也支持 user password=pass role=readwrite commands=get,set keys=app:* enabled=true，可重复传
 --max-request-bytes bytes 单连接最大请求缓冲，默认 16777216
 --max-key-bytes bytes     最大 key 长度，默认 4096
 --max-value-bytes bytes   最大 value 长度，默认 16777216

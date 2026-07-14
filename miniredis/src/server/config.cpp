@@ -63,6 +63,14 @@ std::string normalizeKey(std::string key) {
     return key;
 }
 
+std::string normalizeCommandName(std::string command) {
+    command = trim(command);
+    for (char& c : command) {
+        c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    }
+    return command;
+}
+
 std::string unquote(std::string value) {
     value = trim(value);
     if (value.size() >= 2 &&
@@ -82,6 +90,81 @@ bool parseBool(const std::string& value) {
         return false;
     }
     throw std::invalid_argument("invalid boolean value: " + value);
+}
+
+std::vector<std::string> splitList(const std::string& value, char delimiter) {
+    std::vector<std::string> result;
+    size_t start = 0;
+    while (start <= value.size()) {
+        size_t end = value.find(delimiter, start);
+        std::string item = trim(value.substr(start, end == std::string::npos ? std::string::npos : end - start));
+        if (!item.empty()) result.push_back(std::move(item));
+        if (end == std::string::npos) break;
+        start = end + 1;
+    }
+    return result;
+}
+
+void parseAclCommandRules(AclUser& user, const std::string& value) {
+    std::string lowered = toLower(trim(value));
+    if (lowered == "*" || lowered == "all" || lowered == "allcommands") {
+        user.command_allowlist_enabled = false;
+        user.allowed_commands.clear();
+        user.denied_commands.clear();
+        return;
+    }
+
+    for (std::string token : splitList(value, ',')) {
+        token = trim(std::move(token));
+        if (token.empty()) continue;
+        bool denied = false;
+        if (token.front() == '+') {
+            token.erase(token.begin());
+        } else if (token.front() == '-') {
+            denied = true;
+            token.erase(token.begin());
+        } else {
+            user.command_allowlist_enabled = true;
+        }
+        std::string command = normalizeCommandName(token);
+        if (command.empty()) {
+            throw std::invalid_argument("invalid ACL command rule");
+        }
+        if (denied) {
+            user.denied_commands.push_back(std::move(command));
+        } else {
+            user.command_allowlist_enabled = true;
+            user.allowed_commands.push_back(std::move(command));
+        }
+    }
+}
+
+void parseAclKeyRules(AclUser& user, const std::string& value) {
+    std::string lowered = toLower(trim(value));
+    if (lowered == "*" || lowered == "all" || lowered == "allkeys") {
+        user.all_keys = true;
+        user.key_prefixes.clear();
+        return;
+    }
+
+    user.all_keys = false;
+    user.key_prefixes.clear();
+    for (std::string token : splitList(value, ',')) {
+        token = trim(std::move(token));
+        if (token.empty()) continue;
+        if (token.back() == '*') {
+            token.pop_back();
+        }
+        if (token.empty()) {
+            user.all_keys = true;
+            user.key_prefixes.clear();
+            return;
+        }
+        user.key_prefixes.push_back(std::move(token));
+    }
+    if (user.key_prefixes.empty()) {
+        throw std::invalid_argument("ACL keys must not be empty");
+    }
 }
 
 AclUser parseAclUser(std::string value) {
@@ -122,6 +205,12 @@ AclUser parseAclUser(std::string value) {
                     throw std::invalid_argument("invalid ACL role: " + val);
                 }
                 has_role = true;
+            } else if (key == "enabled" || key == "on") {
+                user.enabled = parseBool(val);
+            } else if (key == "commands" || key == "cmds") {
+                parseAclCommandRules(user, val);
+            } else if (key == "keys" || key == "key_prefixes") {
+                parseAclKeyRules(user, val);
             } else {
                 throw std::invalid_argument("invalid ACL field: " + key);
             }
@@ -344,7 +433,7 @@ void printUsage(const char* program) {
         << "  --replicaof ip:port       Run as a read-only replica of this master\n"
         << "  --replicas a:port,b:port  Master-side replicas to forward write commands\n"
         << "  --requirepass password    Enable AUTH with this password\n"
-        << "  --acl-user user:pass:role Add ACL user, role=admin|readwrite|readonly\n"
+        << "  --acl-user spec           Add ACL user. Old: user:pass:role. New: user password=pass role=readwrite commands=get,set keys=app:* enabled=true\n"
         << "  --max-request-bytes bytes Maximum buffered request bytes per client (default: 16777216)\n"
         << "  --max-key-bytes bytes     Maximum key length in bytes (default: 4096)\n"
         << "  --max-value-bytes bytes   Maximum value length in bytes (default: 16777216)\n"

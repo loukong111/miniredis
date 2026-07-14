@@ -20,6 +20,11 @@ struct CommandSession {
     bool asking = false;
     AclRole role = AclRole::Admin;
     std::string username;
+    bool command_allowlist_enabled = false;
+    std::vector<std::string> allowed_commands;
+    std::vector<std::string> denied_commands;
+    bool all_keys = true;
+    std::vector<std::string> key_prefixes;
 };
 
 class CommandHandler {
@@ -41,7 +46,8 @@ private:
     bool isReplica() const;
     bool authRequired() const;
     bool authenticate(const RespValue& cmd, CommandSession& session) const;
-    bool isAllowed(const std::string& cmd_name, AclRole role) const;
+    bool isAllowed(const std::string& cmd_name, const RespValue& cmd,
+                   const CommandSession& session) const;
     std::string validateKey(const RespValue& key) const;
     std::string validateValue(const RespValue& value) const;
     std::string handleAclCommand(const RespValue& cmd, const CommandSession& session) const;

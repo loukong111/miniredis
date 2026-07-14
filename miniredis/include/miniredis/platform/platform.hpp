@@ -13,7 +13,7 @@ inline constexpr const char* kServerPlatform = "unsupported";
 #endif
 
 inline constexpr const char* kServerPortabilityNote =
-    "MiniRedis server currently uses epoll/eventfd/POSIX sockets and is Linux-first. "
-    "The Qt console is designed to be built as a cross-platform management client.";
+    "MiniRedis server targets Linux because its reactor backend uses epoll/eventfd/POSIX sockets. "
+    "Use Docker or a remote Linux server with the cross-platform Qt console on Windows/macOS.";
 
 }  // namespace miniredis::platform

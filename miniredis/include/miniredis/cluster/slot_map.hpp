@@ -54,6 +54,9 @@ public:
     bool LoadSnapshotIfNewer(const ClusterSlotMapSnapshot& snapshot);
     ClusterSlotMapSnapshot ExportSnapshot() const;
     void clear();
+    bool AddNode(const std::string& node);
+    bool RemoveNode(const std::string& node);
+    bool NodeOwnsSlots(const std::string& node) const;
     std::string GetNodeForSlot(uint16_t slot) const;
     bool SetSlotOwner(uint16_t slot, const std::string& node);
     bool SetSlotState(uint16_t slot, ClusterSlotState state, const std::string& peer_node = "");

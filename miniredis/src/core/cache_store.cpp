@@ -342,6 +342,56 @@ std::optional<std::string> CacheStore::get(const std::string& key) {
     return std::nullopt;
 }
 
+std::optional<std::string> CacheStore::get_and_delete(const std::string& key) {
+    Shard& shard = shard_for(key);
+    std::unique_lock lock(shard.mtx);
+    auto it = shard.store.find(key);
+    if (it == shard.store.end()) return std::nullopt;
+    if (it->second.is_expired()) {
+        erase_entry(shard, it);
+        return std::nullopt;
+    }
+    std::string value = it->second.getValue();
+    erase_entry(shard, it);
+    return value;
+}
+
+std::optional<std::string> CacheStore::get_and_expire(const std::string& key, int64_t ttl_ms) {
+    Shard& shard = shard_for(key);
+    std::unique_lock lock(shard.mtx);
+    auto it = shard.store.find(key);
+    if (it == shard.store.end()) return std::nullopt;
+    if (it->second.is_expired()) {
+        erase_entry(shard, it);
+        return std::nullopt;
+    }
+    it->second.last_access_time = std::chrono::steady_clock::now();
+    if (ttl_ms < 0) {
+        it->second.expire_time = std::chrono::steady_clock::time_point{};
+    } else {
+        it->second.expire_time = std::chrono::steady_clock::now() + std::chrono::milliseconds(ttl_ms);
+    }
+    return it->second.getValue();
+}
+
+bool CacheStore::persist(const std::string& key) {
+    Shard& shard = shard_for(key);
+    std::unique_lock lock(shard.mtx);
+    auto it = shard.store.find(key);
+    if (it == shard.store.end()) return false;
+    if (it->second.is_expired()) {
+        erase_entry(shard, it);
+        return false;
+    }
+    if (it->second.expire_time == std::chrono::steady_clock::time_point{}) {
+        it->second.last_access_time = std::chrono::steady_clock::now();
+        return false;
+    }
+    it->second.expire_time = std::chrono::steady_clock::time_point{};
+    it->second.last_access_time = std::chrono::steady_clock::now();
+    return true;
+}
+
 bool CacheStore::del(const std::string& key) {
     Shard& shard = shard_for(key);
     std::unique_lock lock(shard.mtx);
@@ -378,6 +428,20 @@ bool CacheStore::expire(const std::string& key, int ttl_seconds) {
     return true;
 }
 
+bool CacheStore::pexpire(const std::string& key, int64_t ttl_ms) {
+    Shard& shard = shard_for(key);
+    std::unique_lock lock(shard.mtx);
+    auto it = shard.store.find(key);
+    if (it == shard.store.end()) return false;
+    if (it->second.is_expired()) {
+        erase_entry(shard, it);
+        return false;
+    }
+    it->second.last_access_time = std::chrono::steady_clock::now();
+    it->second.expire_time = std::chrono::steady_clock::now() + std::chrono::milliseconds(ttl_ms);
+    return true;
+}
+
 long long CacheStore::ttl(const std::string& key) {
     Shard& shard = shard_for(key);
     std::unique_lock lock(shard.mtx);
@@ -395,6 +459,24 @@ long long CacheStore::ttl(const std::string& key) {
     auto remaining_ms = std::chrono::duration_cast<std::chrono::milliseconds>(remaining).count();
     if (remaining_ms <= 0) return 0;
     return (remaining_ms + 999) / 1000;
+}
+
+long long CacheStore::pttl(const std::string& key) {
+    Shard& shard = shard_for(key);
+    std::unique_lock lock(shard.mtx);
+    auto it = shard.store.find(key);
+    if (it == shard.store.end()) return -2;
+    if (it->second.is_expired()) {
+        erase_entry(shard, it);
+        return -2;
+    }
+    it->second.last_access_time = std::chrono::steady_clock::now();
+    if (it->second.expire_time == std::chrono::steady_clock::time_point{}) {
+        return -1;
+    }
+    auto remaining = it->second.expire_time - std::chrono::steady_clock::now();
+    auto remaining_ms = std::chrono::duration_cast<std::chrono::milliseconds>(remaining).count();
+    return remaining_ms <= 0 ? 0 : remaining_ms;
 }
 
 size_t CacheStore::cleanup() {

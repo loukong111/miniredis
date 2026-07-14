@@ -137,6 +137,12 @@ bool AppendOnlyFile::appendExpire(const std::string& key, int ttl_seconds) {
     return appendCommand({"PEXPIREAT", key, std::to_string(expireAtMillis(ttl_seconds))});
 }
 
+bool AppendOnlyFile::appendPExpire(const std::string& key, int64_t ttl_ms) {
+    const uint64_t now = currentUnixMillis();
+    const uint64_t expire_at = now + static_cast<uint64_t>(ttl_ms);
+    return appendCommand({"PEXPIREAT", key, std::to_string(expire_at)});
+}
+
 bool AppendOnlyFile::appendCommand(const std::vector<std::string>& parts) {
     std::string encoded = encodeCommand(parts);
     std::lock_guard<std::mutex> lock(mutex_);
@@ -479,80 +485,103 @@ void AppendOnlyFile::runRewrite(SnapshotData data) {
         return;
     }
 
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (rewrite_abort_requested_) {
+    while (true) {
+        std::string buffered_writes;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (rewrite_abort_requested_) {
+                if (::close(tmp_fd) != 0) {
+                    MINIREDIS_LOG_WARN("aof") << "close aborted rewrite temp failed: "
+                                              << std::strerror(errno);
+                }
+                failRewriteLocked(records, duration_ms(),
+                                  "AOF rewrite aborted because rewrite buffer limit was exceeded",
+                                  tmp_path);
+                return;
+            }
+            if (!rewrite_buffer_.empty()) {
+                buffered_writes.swap(rewrite_buffer_);
+                Stats::instance().setAofRewriteBufferBytes(0);
+            } else {
+                if (::fsync(tmp_fd) != 0) {
+                    MINIREDIS_LOG_ERROR("aof") << "fsync rewrite temp AOF failed: "
+                                               << std::strerror(errno);
+                    ok = false;
+                }
+                if (::close(tmp_fd) != 0) {
+                    MINIREDIS_LOG_ERROR("aof") << "close rewrite temp AOF failed: "
+                                               << std::strerror(errno);
+                    ok = false;
+                }
+                if (!ok) {
+                    failRewriteLocked(records, duration_ms(),
+                                      "failed to finish rewrite temp file", tmp_path);
+                    return;
+                }
+
+                const bool was_open = fd_ >= 0;
+                if (was_open) {
+                    if (policy_ != AppendFsyncPolicy::No) {
+                        fsyncLocked();
+                    }
+                    ::close(fd_);
+                    fd_ = -1;
+                }
+
+                if (::rename(tmp_path.c_str(), path_.c_str()) != 0) {
+                    std::string error = std::string("rename rewrite AOF failed: ") +
+                                        std::strerror(errno);
+                    MINIREDIS_LOG_ERROR("aof") << error;
+                    if (was_open) {
+                        fd_ = ::open(path_.c_str(), O_CREAT | O_APPEND | O_WRONLY | O_CLOEXEC, 0644);
+                    }
+                    failRewriteLocked(records, duration_ms(), error, tmp_path);
+                    return;
+                }
+
+                if (!parent.empty()) {
+                    int dir_fd = ::open(parent.string().c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+                    if (dir_fd >= 0) {
+                        if (::fsync(dir_fd) != 0) {
+                            MINIREDIS_LOG_WARN("aof")
+                                << "fsync AOF directory failed: " << std::strerror(errno);
+                        }
+                        ::close(dir_fd);
+                    }
+                }
+
+                if (was_open) {
+                    fd_ = ::open(path_.c_str(), O_CREAT | O_APPEND | O_WRONLY | O_CLOEXEC, 0644);
+                    if (fd_ < 0) {
+                        std::string error = "failed to reopen rewritten AOF: " + path_ +
+                                            " error=" + std::strerror(errno);
+                        MINIREDIS_LOG_ERROR("aof") << error;
+                        failRewriteLocked(records, duration_ms(), error);
+                        return;
+                    }
+                    last_fsync_ = std::chrono::steady_clock::now();
+                }
+
+                rewrite_running_ = false;
+                rewrite_abort_requested_ = false;
+                rewrite_buffer_.clear();
+                Stats::instance().setAofRewriteRunning(false);
+                Stats::instance().setAofRewriteBufferBytes(0);
+                break;
+            }
+        }
+
+        if (!writeAllToFd(tmp_fd, buffered_writes)) {
             if (::close(tmp_fd) != 0) {
-                MINIREDIS_LOG_WARN("aof") << "close aborted rewrite temp failed: "
+                MINIREDIS_LOG_WARN("aof") << "close failed rewrite temp failed: "
                                           << std::strerror(errno);
             }
+            std::lock_guard<std::mutex> lock(mutex_);
             failRewriteLocked(records, duration_ms(),
-                              "AOF rewrite aborted because rewrite buffer limit was exceeded",
+                              "failed to write buffered commands to rewrite temp file",
                               tmp_path);
             return;
         }
-        if (!rewrite_buffer_.empty() && !writeAllToFd(tmp_fd, rewrite_buffer_)) {
-            ok = false;
-        }
-        if (ok && ::fsync(tmp_fd) != 0) {
-            MINIREDIS_LOG_ERROR("aof") << "fsync rewrite temp AOF failed: " << std::strerror(errno);
-            ok = false;
-        }
-        if (::close(tmp_fd) != 0) {
-            MINIREDIS_LOG_ERROR("aof") << "close rewrite temp AOF failed: " << std::strerror(errno);
-            ok = false;
-        }
-        if (!ok) {
-            failRewriteLocked(records, duration_ms(), "failed to finish rewrite temp file", tmp_path);
-            return;
-        }
-
-        const bool was_open = fd_ >= 0;
-        if (was_open) {
-            if (policy_ != AppendFsyncPolicy::No) {
-                fsyncLocked();
-            }
-            ::close(fd_);
-            fd_ = -1;
-        }
-
-        if (::rename(tmp_path.c_str(), path_.c_str()) != 0) {
-            std::string error = std::string("rename rewrite AOF failed: ") + std::strerror(errno);
-            MINIREDIS_LOG_ERROR("aof") << error;
-            if (was_open) {
-                fd_ = ::open(path_.c_str(), O_CREAT | O_APPEND | O_WRONLY | O_CLOEXEC, 0644);
-            }
-            failRewriteLocked(records, duration_ms(), error, tmp_path);
-            return;
-        }
-
-        if (!parent.empty()) {
-            int dir_fd = ::open(parent.string().c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-            if (dir_fd >= 0) {
-                if (::fsync(dir_fd) != 0) {
-                    MINIREDIS_LOG_WARN("aof") << "fsync AOF directory failed: " << std::strerror(errno);
-                }
-                ::close(dir_fd);
-            }
-        }
-
-        if (was_open) {
-            fd_ = ::open(path_.c_str(), O_CREAT | O_APPEND | O_WRONLY | O_CLOEXEC, 0644);
-            if (fd_ < 0) {
-                std::string error = "failed to reopen rewritten AOF: " + path_ +
-                                    " error=" + std::strerror(errno);
-                MINIREDIS_LOG_ERROR("aof") << error;
-                failRewriteLocked(records, duration_ms(), error);
-                return;
-            }
-            last_fsync_ = std::chrono::steady_clock::now();
-        }
-
-        rewrite_running_ = false;
-        rewrite_abort_requested_ = false;
-        rewrite_buffer_.clear();
-        Stats::instance().setAofRewriteRunning(false);
-        Stats::instance().setAofRewriteBufferBytes(0);
     }
 
     Stats::instance().recordAofRewriteResult(true, records, duration_ms());

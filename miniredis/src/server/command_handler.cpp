@@ -6,6 +6,7 @@
 #include <arpa/inet.h>
 #include <cerrno>
 #include <charconv>
+#include <cstdint>
 #include <cctype>
 #include <cstring>
 #include <iomanip>
@@ -39,7 +40,10 @@ const std::vector<CommandSpec>& commandTable() {
         {"set",   -3, {"write", "denyoom"},      1,  1, 1},
         {"setnx",  3, {"write", "denyoom", "fast"}, 1, 1, 1},
         {"get",    2, {"readonly", "fast"},      1,  1, 1},
+        {"getdel", 2, {"write", "fast"},         1,  1, 1},
+        {"getex", -2, {"write", "fast"},         1,  1, 1},
         {"strlen", 2, {"readonly", "fast"},      1,  1, 1},
+        {"type",   2, {"readonly", "fast"},      1,  1, 1},
         {"append", 3, {"write", "denyoom"},      1,  1, 1},
         {"incr",   2, {"write", "denyoom", "fast"}, 1, 1, 1},
         {"decr",   2, {"write", "denyoom", "fast"}, 1, 1, 1},
@@ -49,7 +53,10 @@ const std::vector<CommandSpec>& commandTable() {
         {"exists",-2, {"readonly", "fast"},      1, -1, 1},
         {"mget",  -2, {"readonly", "fast"},      1, -1, 1},
         {"expire", 3, {"write", "fast"},         1,  1, 1},
+        {"pexpire", 3, {"write", "fast"},        1,  1, 1},
+        {"persist", 2, {"write", "fast"},        1,  1, 1},
         {"ttl",    2, {"readonly", "fast"},      1,  1, 1},
+        {"pttl",   2, {"readonly", "fast"},      1,  1, 1},
         {"command",-1, {"loading", "stale"},     0,  0, 0},
         {"info",  -1, {"loading", "stale"},      0,  0, 0},
         {"slowlog",-2, {"admin", "stale"},       0,  0, 0},
@@ -233,6 +240,11 @@ bool parseInt64Strict(const std::string& value, long long& out) {
     return ec == std::errc() && ptr == value.data() + value.size();
 }
 
+bool parsePositiveInt64(const std::string& value, int64_t& out) {
+    auto [ptr, ec] = std::from_chars(value.data(), value.data() + value.size(), out);
+    return ec == std::errc() && ptr == value.data() + value.size() && out > 0;
+}
+
 bool parseSlot(const std::string& value, int& out) {
     auto [ptr, ec] = std::from_chars(value.data(), value.data() + value.size(), out);
     return ec == std::errc() && ptr == value.data() + value.size() &&
@@ -387,13 +399,6 @@ std::vector<std::string> splitNodeList(const std::string& nodes_str) {
     return nodes;
 }
 
-bool isClientWriteCommand(const std::string& cmd_name) {
-    return cmd_name == "SET" || cmd_name == "DEL" || cmd_name == "EXPIRE" ||
-           cmd_name == "SETNX" || cmd_name == "APPEND" || cmd_name == "INCR" ||
-           cmd_name == "DECR" || cmd_name == "INCRBY" || cmd_name == "DECRBY" ||
-           cmd_name == "BGREWRITEAOF";
-}
-
 bool constantTimeEquals(const std::string& lhs, const std::string& rhs) {
     const size_t max_len = std::max(lhs.size(), rhs.size());
     unsigned char diff = static_cast<unsigned char>(lhs.size() ^ rhs.size());
@@ -403,6 +408,89 @@ bool constantTimeEquals(const std::string& lhs, const std::string& rhs) {
         diff |= static_cast<unsigned char>(a ^ b);
     }
     return diff == 0;
+}
+
+bool containsCommand(const std::vector<std::string>& commands, const std::string& cmd_name) {
+    return std::find(commands.begin(), commands.end(), cmd_name) != commands.end();
+}
+
+bool isReadonlyCommand(const std::string& cmd_name) {
+    return cmd_name == "PING" || cmd_name == "GET" || cmd_name == "MGET" ||
+           cmd_name == "STRLEN" || cmd_name == "TYPE" ||
+           cmd_name == "TTL" || cmd_name == "PTTL" || cmd_name == "EXISTS" ||
+           cmd_name == "INFO" || cmd_name == "COMMAND" || cmd_name == "ACL" ||
+           cmd_name == "ASKING";
+}
+
+bool isWriteCommand(const std::string& cmd_name) {
+    return cmd_name == "SET" || cmd_name == "SETNX" || cmd_name == "APPEND" ||
+           cmd_name == "INCR" || cmd_name == "DECR" || cmd_name == "INCRBY" ||
+           cmd_name == "DECRBY" || cmd_name == "DEL" || cmd_name == "EXPIRE" ||
+           cmd_name == "PEXPIRE" || cmd_name == "PERSIST" ||
+           cmd_name == "GETDEL" || cmd_name == "GETEX";
+}
+
+bool isClientWriteCommand(const std::string& cmd_name) {
+    return isWriteCommand(cmd_name) || cmd_name == "BGREWRITEAOF";
+}
+
+std::vector<std::string> aclKeysForCommand(const std::string& cmd_name, const RespValue& cmd) {
+    const bool single_key =
+        cmd_name == "GET" || cmd_name == "GETDEL" || cmd_name == "GETEX" ||
+        cmd_name == "SET" || cmd_name == "SETNX" || cmd_name == "APPEND" ||
+        cmd_name == "STRLEN" || cmd_name == "TYPE" ||
+        cmd_name == "INCR" || cmd_name == "DECR" ||
+        cmd_name == "INCRBY" || cmd_name == "DECRBY" ||
+        cmd_name == "EXPIRE" || cmd_name == "PEXPIRE" ||
+        cmd_name == "PERSIST" || cmd_name == "TTL" || cmd_name == "PTTL";
+    const bool multi_key = cmd_name == "DEL" || cmd_name == "EXISTS" || cmd_name == "MGET";
+    if (!single_key && !multi_key) return {};
+    if (cmd.array.size() < 2) return {};
+
+    std::vector<std::string> keys;
+    const size_t last = multi_key ? cmd.array.size() - 1 : 1;
+    keys.reserve(last);
+    for (size_t i = 1; i <= last; ++i) {
+        if (cmd.array[i].type == RespType::BULK_STRING) {
+            keys.push_back(cmd.array[i].str);
+        }
+    }
+    return keys;
+}
+
+bool keyMatchesAcl(const std::string& key, const CommandSession& session) {
+    if (session.all_keys) return true;
+    for (const auto& prefix : session.key_prefixes) {
+        if (key.rfind(prefix, 0) == 0) return true;
+    }
+    return false;
+}
+
+std::string joinAclList(const std::vector<std::string>& values) {
+    if (values.empty()) return "-";
+    std::ostringstream oss;
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (i > 0) oss << ",";
+        oss << values[i];
+    }
+    return oss.str();
+}
+
+std::string aclCommandsText(const AclUser& user) {
+    if (!user.command_allowlist_enabled && user.denied_commands.empty()) return "all";
+    std::vector<std::string> tokens;
+    tokens.reserve(user.allowed_commands.size() + user.denied_commands.size());
+    for (const auto& command : user.allowed_commands) tokens.push_back("+" + command);
+    for (const auto& command : user.denied_commands) tokens.push_back("-" + command);
+    return joinAclList(tokens);
+}
+
+std::string aclKeysText(const AclUser& user) {
+    if (user.all_keys) return "*";
+    std::vector<std::string> prefixes;
+    prefixes.reserve(user.key_prefixes.size());
+    for (const auto& prefix : user.key_prefixes) prefixes.push_back(prefix + "*");
+    return joinAclList(prefixes);
 }
 
 bool splitNodeAddr(const std::string& node, std::string& host, int& port) {
@@ -469,6 +557,11 @@ bool CommandHandler::authenticate(const RespValue& cmd, CommandSession& session)
             session.authenticated = true;
             session.role = AclRole::Admin;
             session.username = "default";
+            session.command_allowlist_enabled = false;
+            session.allowed_commands.clear();
+            session.denied_commands.clear();
+            session.all_keys = true;
+            session.key_prefixes.clear();
             return true;
         }
         return false;
@@ -480,11 +573,17 @@ bool CommandHandler::authenticate(const RespValue& cmd, CommandSession& session)
         const std::string& username = cmd.array[1].str;
         const std::string& password = cmd.array[2].str;
         for (const auto& user : config_.acl_users) {
-            if (constantTimeEquals(user.username, username) &&
+            if (user.enabled &&
+                constantTimeEquals(user.username, username) &&
                 constantTimeEquals(user.password, password)) {
                 session.authenticated = true;
                 session.role = user.role;
                 session.username = user.username;
+                session.command_allowlist_enabled = user.command_allowlist_enabled;
+                session.allowed_commands = user.allowed_commands;
+                session.denied_commands = user.denied_commands;
+                session.all_keys = user.all_keys;
+                session.key_prefixes = user.key_prefixes;
                 return true;
             }
         }
@@ -494,22 +593,26 @@ bool CommandHandler::authenticate(const RespValue& cmd, CommandSession& session)
     return false;
 }
 
-bool CommandHandler::isAllowed(const std::string& cmd_name, AclRole role) const {
-    if (role == AclRole::Admin) return true;
-
-    const bool readonly =
-        cmd_name == "PING" || cmd_name == "GET" || cmd_name == "MGET" ||
-        cmd_name == "STRLEN" || cmd_name == "TTL" || cmd_name == "EXISTS" || cmd_name == "INFO" ||
-        cmd_name == "COMMAND" || cmd_name == "ACL" || cmd_name == "ASKING";
-    if (role == AclRole::ReadOnly) return readonly;
-
-    const bool write =
-        cmd_name == "SET" || cmd_name == "SETNX" || cmd_name == "APPEND" ||
-        cmd_name == "INCR" || cmd_name == "DECR" || cmd_name == "INCRBY" ||
-        cmd_name == "DECRBY" || cmd_name == "DEL" || cmd_name == "EXPIRE";
-    if (role == AclRole::ReadWrite) return readonly || write;
-
-    return false;
+bool CommandHandler::isAllowed(const std::string& cmd_name, const RespValue& cmd,
+                               const CommandSession& session) const {
+    bool role_allows = false;
+    if (session.role == AclRole::Admin) {
+        role_allows = true;
+    } else if (session.role == AclRole::ReadOnly) {
+        role_allows = isReadonlyCommand(cmd_name);
+    } else if (session.role == AclRole::ReadWrite) {
+        role_allows = isReadonlyCommand(cmd_name) || isWriteCommand(cmd_name);
+    }
+    if (!role_allows) return false;
+    if (containsCommand(session.denied_commands, cmd_name)) return false;
+    if (session.command_allowlist_enabled &&
+        !containsCommand(session.allowed_commands, cmd_name)) {
+        return false;
+    }
+    for (const auto& key : aclKeysForCommand(cmd_name, cmd)) {
+        if (!keyMatchesAcl(key, session)) return false;
+    }
+    return true;
 }
 
 std::string CommandHandler::validateKey(const RespValue& key) const {
@@ -557,15 +660,60 @@ std::string CommandHandler::handleAclCommand(const RespValue& cmd, const Command
 
         std::vector<std::string> users;
         if (!config_.requirepass.empty()) {
-            users.push_back(RespWriter::bulkString("user default role=admin password=*****"));
+            users.push_back(RespWriter::bulkString(
+                "user default on role=admin commands=all keys=* password=*****"));
         }
         users.reserve(users.size() + config_.acl_users.size());
         for (const auto& user : config_.acl_users) {
             users.push_back(RespWriter::bulkString("user " + user.username +
+                                                   (user.enabled ? " on" : " off") +
                                                    " role=" + aclRoleName(user.role) +
+                                                   " commands=" + aclCommandsText(user) +
+                                                   " keys=" + aclKeysText(user) +
                                                    " password=*****"));
         }
         return respArray(users);
+    }
+
+    if (subcmd == "GETUSER") {
+        if (cmd.array.size() != 3 || cmd.array[2].type != RespType::BULK_STRING) {
+            return RespWriter::error("wrong number of arguments for 'acl getuser'");
+        }
+        if (session.role != AclRole::Admin) {
+            return RespWriter::error("NOPERM this user has no permissions to run the command");
+        }
+        const std::string& username = cmd.array[2].str;
+        if (username == "default" && !config_.requirepass.empty()) {
+            return respArray({
+                RespWriter::bulkString("user"),
+                RespWriter::bulkString("default"),
+                RespWriter::bulkString("enabled"),
+                RespWriter::bulkString("yes"),
+                RespWriter::bulkString("role"),
+                RespWriter::bulkString("admin"),
+                RespWriter::bulkString("commands"),
+                RespWriter::bulkString("all"),
+                RespWriter::bulkString("keys"),
+                RespWriter::bulkString("*"),
+            });
+        }
+        for (const auto& user : config_.acl_users) {
+            if (user.username == username) {
+                return respArray({
+                    RespWriter::bulkString("user"),
+                    RespWriter::bulkString(user.username),
+                    RespWriter::bulkString("enabled"),
+                    RespWriter::bulkString(user.enabled ? "yes" : "no"),
+                    RespWriter::bulkString("role"),
+                    RespWriter::bulkString(aclRoleName(user.role)),
+                    RespWriter::bulkString("commands"),
+                    RespWriter::bulkString(aclCommandsText(user)),
+                    RespWriter::bulkString("keys"),
+                    RespWriter::bulkString(aclKeysText(user)),
+                });
+            }
+        }
+        return RespWriter::nullBulkString();
     }
 
     if (subcmd == "HELP") {
@@ -575,6 +723,7 @@ std::string CommandHandler::handleAclCommand(const RespValue& cmd, const Command
         return respArray({
             RespWriter::bulkString("ACL WHOAMI"),
             RespWriter::bulkString("ACL LIST"),
+            RespWriter::bulkString("ACL GETUSER username"),
         });
     }
 
@@ -603,10 +752,13 @@ std::string CommandHandler::routeIfNeeded(const std::string& cmd_name, const Res
                         cmd_name == "DEL" || cmd_name == "EXISTS" ||
                         cmd_name == "MGET" || cmd_name == "SETNX" ||
                         cmd_name == "APPEND" || cmd_name == "STRLEN" ||
+                        cmd_name == "TYPE" ||
                         cmd_name == "INCR" || cmd_name == "DECR" ||
                         cmd_name == "INCRBY" || cmd_name == "DECRBY" ||
-                        cmd_name == "EXPIRE" ||
-                        cmd_name == "TTL");
+                        cmd_name == "EXPIRE" || cmd_name == "PEXPIRE" ||
+                        cmd_name == "PERSIST" || cmd_name == "GETDEL" ||
+                        cmd_name == "GETEX" ||
+                        cmd_name == "TTL" || cmd_name == "PTTL");
     if (!needs_route || !cluster_mode_) return {};
     if (cmd.array.size() < 2) {
         return RespWriter::error("wrong number of arguments for '" + cmd_name + "'");
@@ -1246,6 +1398,52 @@ std::string CommandHandler::handleClusterCommand(const RespValue& cmd) {
         return handleClusterFailover(cmd);
     }
 
+    if (subcmd == "MEET") {
+        if (!cluster_mode_ || !slot_map_ || !slot_map_mutex_) {
+            return RespWriter::error("cluster mode is not enabled");
+        }
+        if (cmd.array.size() != 3 || cmd.array[2].type != RespType::BULK_STRING) {
+            return RespWriter::error("wrong number of arguments for 'cluster meet'");
+        }
+        std::string host;
+        int port = 0;
+        if (!splitNodeAddr(cmd.array[2].str, host, port)) {
+            return RespWriter::error("invalid node address");
+        }
+        {
+            std::lock_guard<std::mutex> lock(*slot_map_mutex_);
+            if (!slot_map_->AddNode(cmd.array[2].str)) {
+                return RespWriter::error("failed to add cluster node");
+            }
+        }
+        if (cluster_change_callback_) cluster_change_callback_();
+        return RespWriter::simpleString("OK");
+    }
+
+    if (subcmd == "FORGET") {
+        if (!cluster_mode_ || !slot_map_ || !slot_map_mutex_) {
+            return RespWriter::error("cluster mode is not enabled");
+        }
+        if (cmd.array.size() != 3 || cmd.array[2].type != RespType::BULK_STRING) {
+            return RespWriter::error("wrong number of arguments for 'cluster forget'");
+        }
+        const std::string& node = cmd.array[2].str;
+        if (node == current_node_) {
+            return RespWriter::error("cannot forget myself");
+        }
+        {
+            std::lock_guard<std::mutex> lock(*slot_map_mutex_);
+            if (slot_map_->NodeOwnsSlots(node)) {
+                return RespWriter::error("node still owns slots; migrate or reassign slots first");
+            }
+            if (!slot_map_->RemoveNode(node)) {
+                return RespWriter::error("unknown cluster node");
+            }
+        }
+        if (cluster_change_callback_) cluster_change_callback_();
+        return RespWriter::simpleString("OK");
+    }
+
     if (subcmd == "INFO") {
         auto nodes = clusterNodes();
         size_t assigned_slots = 0;
@@ -1474,7 +1672,7 @@ std::string CommandHandler::handle(const RespValue& cmd, CommandSession& session
         return handleAclCommand(cmd, session);
     }
 
-    if (!isAllowed(cmd_name, session.role)) {
+    if (!isAllowed(cmd_name, cmd, session)) {
         Stats::instance().recordCommand(cmd_name);
         return RespWriter::error("NOPERM this user has no permissions to run the command");
     }
@@ -1527,6 +1725,89 @@ std::string CommandHandler::handle(const RespValue& cmd, CommandSession& session
         return RespWriter::nullBulkString();
     }
 
+    if (cmd_name == "GETDEL") {
+        if (cmd.array.size() != 2) return RespWriter::error("wrong number of arguments for 'getdel'");
+        const RespValue& key_arg = cmd.array[1];
+        std::string key_error = validateKey(key_arg);
+        if (!key_error.empty()) return key_error;
+        auto val = cache_.get_and_delete(key_arg.str);
+        refreshRuntimeStats();
+        if (!val) {
+            Stats::instance().recordGetMiss();
+            return RespWriter::nullBulkString();
+        }
+        Stats::instance().recordGetHit();
+        if (aof_ && !aof_->appendDel({key_arg.str})) {
+            MINIREDIS_LOG_ERROR("aof") << "failed to append GETDEL command as DEL";
+        }
+        replicateWrite({"REPLDEL", key_arg.str});
+        return RespWriter::bulkString(*val);
+    }
+
+    if (cmd_name == "GETEX") {
+        if (cmd.array.size() != 2 && cmd.array.size() != 3 && cmd.array.size() != 4) {
+            return RespWriter::error("wrong number of arguments for 'getex'");
+        }
+        const RespValue& key_arg = cmd.array[1];
+        std::string key_error = validateKey(key_arg);
+        if (!key_error.empty()) return key_error;
+
+        bool persist = false;
+        int64_t ttl_ms = -1;
+        if (cmd.array.size() == 3) {
+            if (cmd.array[2].type != RespType::BULK_STRING ||
+                toUpper(cmd.array[2].str) != "PERSIST") {
+                return RespWriter::error("syntax error");
+            }
+            persist = true;
+        } else if (cmd.array.size() == 4) {
+            if (cmd.array[2].type != RespType::BULK_STRING ||
+                cmd.array[3].type != RespType::BULK_STRING) {
+                return RespWriter::error("syntax error");
+            }
+            std::string option = toUpper(cmd.array[2].str);
+            int64_t parsed = 0;
+            if (option == "EX") {
+                if (!parsePositiveInt64(cmd.array[3].str, parsed) ||
+                    parsed > std::numeric_limits<int64_t>::max() / 1000) {
+                    return RespWriter::error("invalid expire time");
+                }
+                ttl_ms = parsed * 1000;
+            } else if (option == "PX") {
+                if (!parsePositiveInt64(cmd.array[3].str, parsed)) {
+                    return RespWriter::error("invalid expire time");
+                }
+                ttl_ms = parsed;
+            } else {
+                return RespWriter::error("syntax error");
+            }
+        }
+
+        auto val = (cmd.array.size() == 2) ? cache_.get(key_arg.str)
+                                           : cache_.get_and_expire(key_arg.str, persist ? -1 : ttl_ms);
+        refreshRuntimeStats();
+        if (!val) {
+            Stats::instance().recordGetMiss();
+            return RespWriter::nullBulkString();
+        }
+        Stats::instance().recordGetHit();
+        if (cmd.array.size() != 2) {
+            if (persist) {
+                if (aof_ && !aof_->appendSet(key_arg.str, *val, 0)) {
+                    MINIREDIS_LOG_ERROR("aof") << "failed to append GETEX PERSIST command as SET";
+                }
+                replicateWrite({"REPLSET", key_arg.str, *val, "0"});
+            } else {
+                if (aof_ && !aof_->appendPExpire(key_arg.str, ttl_ms)) {
+                    MINIREDIS_LOG_ERROR("aof") << "failed to append GETEX expire command";
+                }
+                int64_t repl_seconds = (ttl_ms + 999) / 1000;
+                replicateWrite({"REPLEXPIRE", key_arg.str, std::to_string(repl_seconds)});
+            }
+        }
+        return RespWriter::bulkString(*val);
+    }
+
     if (cmd_name == "STRLEN") {
         if (cmd.array.size() != 2) return RespWriter::error("wrong number of arguments for 'strlen'");
         const RespValue& key_arg = cmd.array[1];
@@ -1536,6 +1817,17 @@ std::string CommandHandler::handle(const RespValue& cmd, CommandSession& session
         Stats::instance().recordCommand(cmd_name);
         refreshRuntimeStats();
         return RespWriter::integer(static_cast<long long>(val ? val->size() : 0));
+    }
+
+    if (cmd_name == "TYPE") {
+        if (cmd.array.size() != 2) return RespWriter::error("wrong number of arguments for 'type'");
+        const RespValue& key_arg = cmd.array[1];
+        std::string key_error = validateKey(key_arg);
+        if (!key_error.empty()) return key_error;
+        bool present = cache_.exists(key_arg.str);
+        Stats::instance().recordCommand(cmd_name);
+        refreshRuntimeStats();
+        return RespWriter::simpleString(present ? "string" : "none");
     }
 
     if (cmd_name == "MGET") {
@@ -1763,12 +2055,70 @@ SetResult set_result = cache_.set(key_arg.str, val_arg.str, ttl_seconds);
         return RespWriter::integer(updated ? 1 : 0);
     }
 
+    if (cmd_name == "PEXPIRE") {
+        if (cmd.array.size() != 3) return RespWriter::error("wrong number of arguments for 'pexpire'");
+        const RespValue& key_arg = cmd.array[1];
+        const RespValue& ttl_arg = cmd.array[2];
+        if (key_arg.type != RespType::BULK_STRING || ttl_arg.type != RespType::BULK_STRING) {
+            return RespWriter::error("key and ttl must be bulk strings");
+        }
+        std::string key_error = validateKey(key_arg);
+        if (!key_error.empty()) return key_error;
+        int64_t ttl_ms = 0;
+        if (!parsePositiveInt64(ttl_arg.str, ttl_ms)) {
+            return RespWriter::error("invalid expire time");
+        }
+        bool updated = cache_.pexpire(key_arg.str, ttl_ms);
+        Stats::instance().recordCommand(cmd_name);
+        refreshRuntimeStats();
+        if (aof_ && updated && !aof_->appendPExpire(key_arg.str, ttl_ms)) {
+            MINIREDIS_LOG_ERROR("aof") << "failed to append PEXPIRE command";
+        }
+        if (updated) {
+            int64_t repl_seconds = (ttl_ms + 999) / 1000;
+            replicateWrite({"REPLEXPIRE", key_arg.str, std::to_string(repl_seconds)});
+        }
+        return RespWriter::integer(updated ? 1 : 0);
+    }
+
+    if (cmd_name == "PERSIST") {
+        if (cmd.array.size() != 2) return RespWriter::error("wrong number of arguments for 'persist'");
+        const RespValue& key_arg = cmd.array[1];
+        std::string key_error = validateKey(key_arg);
+        if (!key_error.empty()) return key_error;
+        bool updated = cache_.persist(key_arg.str);
+        std::optional<std::string> val;
+        if (updated) {
+            val = cache_.get(key_arg.str);
+        }
+        Stats::instance().recordCommand(cmd_name);
+        refreshRuntimeStats();
+        if (updated && val) {
+            if (aof_ && !aof_->appendSet(key_arg.str, *val, 0)) {
+                MINIREDIS_LOG_ERROR("aof") << "failed to append PERSIST command as SET";
+            }
+            replicateWrite({"REPLSET", key_arg.str, *val, "0"});
+        }
+        return RespWriter::integer(updated ? 1 : 0);
+    }
+
     if (cmd_name == "TTL") {
         if (cmd.array.size() != 2) return RespWriter::error("wrong number of arguments for 'ttl'");
         const RespValue& key_arg = cmd.array[1];
         std::string key_error = validateKey(key_arg);
         if (!key_error.empty()) return key_error;
         long long remaining = cache_.ttl(key_arg.str);
+        Stats::instance().recordCommand(cmd_name);
+        refreshRuntimeStats();
+        return RespWriter::integer(remaining);
+    }
+
+    if (cmd_name == "PTTL") {
+        if (cmd.array.size() != 2) return RespWriter::error("wrong number of arguments for 'pttl'");
+        const RespValue& key_arg = cmd.array[1];
+        std::string key_error = validateKey(key_arg);
+        if (!key_error.empty()) return key_error;
+        long long remaining = cache_.pttl(key_arg.str);
         Stats::instance().recordCommand(cmd_name);
         refreshRuntimeStats();
         return RespWriter::integer(remaining);

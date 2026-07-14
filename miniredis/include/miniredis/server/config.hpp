@@ -16,6 +16,12 @@ struct AclUser {
     std::string username;
     std::string password;
     AclRole role = AclRole::ReadOnly;
+    bool enabled = true;
+    bool command_allowlist_enabled = false;
+    std::vector<std::string> allowed_commands;
+    std::vector<std::string> denied_commands;
+    bool all_keys = true;
+    std::vector<std::string> key_prefixes;
 };
 
 struct AppConfig {

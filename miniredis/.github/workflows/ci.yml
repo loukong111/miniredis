@@ -80,3 +80,20 @@ jobs:
 
       - name: Docker build
         run: docker build -t miniredis:ci .
+
+  platform-boundary:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            cmake
+
+      - name: Check platform build boundary
+        run: scripts/check_platform_build.sh

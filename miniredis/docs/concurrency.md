@@ -31,8 +31,8 @@ background threads
 `CacheStore` 按 key hash 拆分为多个 shard：
 
 - 每个 shard 有独立 `std::shared_mutex`
-- `GET` / `EXISTS` / `TTL` 使用共享锁读取，发现过期 key 时升级为独占路径做惰性删除
-- `SET` / `SETNX` / `APPEND` / `INCR` / `DEL` / `EXPIRE` 使用独占锁修改命中的 shard
+- `GET` / `EXISTS` / `TTL` / `PTTL` / `TYPE` 使用读路径语义，发现过期 key 时走惰性删除
+- `SET` / `SETNX` / `APPEND` / `INCR` / `DEL` / `GETDEL` / `GETEX` / `EXPIRE` / `PEXPIRE` / `PERSIST` 使用独占锁修改命中的 shard
 - `snapshot()` 遍历所有 shard，并在每个 shard 内持有共享锁复制当前存活数据
 - `cleanup()` 遍历所有 shard，并在每个 shard 内独占删除过期数据
 
@@ -73,7 +73,7 @@ AOF append 由 `AppendOnlyFile::mutex_` 串行保护：
 - 按 `appendfsync` 策略刷盘
 - 如果 rewrite 正在运行，同时追加到 rewrite buffer
 
-`BGREWRITEAOF` 后台线程先基于当前 snapshot 写 compact 临时文件；收尾阶段短暂持有 AOF mutex，把 rewrite 期间的新写入 buffer 合并进去，再 `fsync + rename` 原子替换正式 AOF。rewrite 失败会删除临时文件并保留旧 AOF；rewrite buffer 有上限，超限时中止本轮 rewrite，但业务写入仍追加到旧 AOF。
+`BGREWRITEAOF` 后台线程先基于当前 snapshot 写 compact 临时文件；收尾时循环把 rewrite 期间的新写入 buffer 交换到局部变量，并在锁外写入临时文件。只有当 buffer 为空时，才短暂持有 AOF mutex 执行最终 `fsync + rename + reopen`，从而减少高写入场景下的写路径阻塞。rewrite 失败会删除临时文件并保留旧 AOF；rewrite buffer 有上限，超限时中止本轮 rewrite，但业务写入仍追加到旧 AOF。
 
 已覆盖的恢复场景：
 
@@ -107,7 +107,7 @@ AOF append 由 `AppendOnlyFile::mutex_` 串行保护：
 
 - 当前复制支持启动全量同步、轻量 backlog 增量同步和后续异步转发，不提供完整 Redis PSYNC2、backlog 持久化和自动选主。
 - 手动 failover takeover 会更新本地 slot ownership，但不做多数派投票。
-- AOF rewrite 是线程内实现，不是 Redis 多进程 rewrite。
+- AOF rewrite 采用单进程后台线程实现，避免依赖 `fork`，更贴合当前 C++ 单进程架构。
 - HTTP stats server 是轻量监控入口，不适合作为高 QPS 业务接口。
 - 没有 TLS，公网部署需要网关、内网隔离或安全组。
 

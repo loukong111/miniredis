@@ -82,10 +82,15 @@ public:
     ValueUpdateResult append(const std::string& key, const std::string& suffix);
     IncrementResult increment(const std::string& key, long long delta);
     std::optional<std::string> get(const std::string& key);
+    std::optional<std::string> get_and_delete(const std::string& key);
+    std::optional<std::string> get_and_expire(const std::string& key, int64_t ttl_ms);
+    bool persist(const std::string& key);
     bool del(const std::string& key);
     bool exists(const std::string& key);
     bool expire(const std::string& key, int ttl_seconds);
+    bool pexpire(const std::string& key, int64_t ttl_ms);
     long long ttl(const std::string& key);
+    long long pttl(const std::string& key);
     size_t cleanup();   // 清理过期条目，释放内存池内存
     std::vector<std::string> keys() const;
 
