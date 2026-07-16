@@ -179,13 +179,14 @@ fsync(parent dir)
 推荐演示顺序：
 
 1. 启动 Qt Console。
-2. Server 页启动单节点，设置 `requirepass`、AOF、maxmemory、slowlog。
-3. Console 页执行 `AUTH`、`SET`、`SETNX`、`GET`、`GETDEL`、`GETEX`、`APPEND`、`STRLEN`、`TYPE`、`INCR`、`EXPIRE/PEXPIRE`、`PERSIST`、`TTL/PTTL`、`MGET`。
-4. Observability 页展示连接数、命令数、命中率、延迟、snapshot/AOF 状态。
-5. Diagnostics 页点击 `/healthz`、`/readyz`、`INFO persistence`、`SLOWLOG GET`。
-6. Server 页执行 Persistence Demo、Rewrite AOF、Restart Server，验证恢复。
-7. 启动 3-node Cluster Demo，在 Cluster 页展示 `CLUSTER NODES/SLOTS`、MOVED 自动跟随、slot migration。
-8. Benchmark 页运行一组 SET/GET 压测，展示 QPS 和 p95/p99。
+2. 通过服务管理入口启动单节点，设置 `requirepass`、ACL 用户、AOF、maxmemory、slowlog。
+3. 在命令工作区执行 `AUTH`、`SET`、`SETNX`、`GET`、`GETDEL`、`GETEX`、`APPEND`、`STRLEN`、`TYPE`、`INCR`、`EXPIRE/PEXPIRE`、`PERSIST`、`TTL/PTTL`、`MGET`。
+4. 通过运行指标入口展示连接数、命令数、命中率、延迟、snapshot/AOF 状态。
+5. 通过诊断工具触发 `/healthz`、`/readyz`、`INFO persistence`、`ACL LIST/GETUSER`、`SLOWLOG GET`。
+6. 在服务管理中执行持久化演示、重写 AOF、重启服务，验证恢复。
+7. 启动三节点集群演示，在集群路由入口展示 `CLUSTER NODES/SLOTS/SLOTMAP`、`MEET/FORGET`、MOVED 自动跟随、slot migration 和手动 takeover。
+8. 在演示中心运行 smoke、recovery/soak、replica、cluster 脚本，说明核心场景可自动验证。
+9. 进入压测入口运行一组 SET/GET 压测，展示 QPS 和 p95/p99。
 
 ## 简历描述
 

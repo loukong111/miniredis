@@ -92,6 +92,9 @@ QString RespClient::parseLineValue(int& pos, QChar prefix, const QString& label,
     }
     QString value = QString::fromUtf8(buffer_.mid(pos + 1, end - pos - 1));
     pos = end + 2;
+    if (prefix == '-' && !label.isEmpty() && value.startsWith(label)) {
+        return value;
+    }
     return label.isEmpty() ? value : label + value;
 }
 

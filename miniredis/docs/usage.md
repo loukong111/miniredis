@@ -30,17 +30,21 @@ cmake --build build-qt -j
 ./build-qt/tools/qt_console/miniredis_qt_console
 ```
 
-Qt Console 可以作为主要演示入口：Console 页提供资源树、多行命令编辑器、命令模板、历史记录、执行输出、错误提示、运行摘要和命令参考；Demo Lab 页提供 Replication/PSYNC、AOF Recovery 和 Cluster 故障观察的一键流程；Server 页负责单机/三节点集群启停、AOF、maxmemory、IO threads、cache shards、slowlog 等配置；KV、Cluster、Observability、Diagnostics、Metrics、Raw Command、Benchmark 页分别覆盖命令测试、分片路由、运行监控、健康检查、Prometheus 指标、任意 RESP 命令和压测。
+Qt Console 可以作为主要演示入口：顶部菜单和工具栏负责连接、运行、服务、集群、监控、自动验证和压测入口；左侧资源管理器展示当前连接、常用 KV 命令、诊断命令、集群命令和 ACL 命令；中间命令工作区提供多行编辑、模板、历史记录、选中/当前行执行、全部执行和统一输出；服务管理、演示中心、集群路由、运行指标、诊断工具、Prometheus 指标和压测能力都通过弹窗打开，主界面保持简洁。
 
-持久化演示推荐流程：在 Server 页勾选 `AOF` 后启动服务，点击 `Persistence Demo` 写入普通 key 和 TTL key，点击 `Rewrite AOF` 压缩增量日志，再点击 `Restart Server` 重启并使用 Console 页查询 `GET persist:plain`、`TTL persist:plain`、`INFO persistence`。
+持久化演示推荐流程：进入服务管理，勾选 `AOF` 后启动服务，点击持久化演示写入普通 key 和 TTL key，点击重写 AOF 压缩增量日志，再重启服务并在命令工作区查询 `GET persist:plain`、`TTL persist:plain`、`INFO persistence`。
 
-如果只想演示项目能力，可以直接使用 Demo Lab：
+如果只想演示项目能力，可以直接使用演示中心：
 
 - `Run Replication Demo`：启动 master/replica，展示 backlog/PSYNC offset、replica 断开期间写入和重连后的增量恢复。
 - `Run AOF Recovery Demo`：启动带 AOF 的单节点，写入数据、触发 rewrite、重启并验证恢复。
 - `Run Cluster Demo`：启动三节点集群，展示 slots/nodes，并停止一个节点观察 pfail/fail。
+- `Smoke 测试`：运行 `tests/integration/smoke.sh`，覆盖 RESP、AUTH、TTL、stats、cluster 等集成场景。
+- `Recovery/Soak`：运行 `scripts/recovery_soak.sh`，覆盖持久化恢复、坏尾/重启和短时稳定性验证。
+- `Replica 脚本`：运行 `scripts/replica_demo.sh smoke`，验证主从复制和只读副本行为。
+- `Cluster 脚本`：运行 `scripts/cluster_demo.sh smoke`，验证 slot range、cluster nodes、slots 和路由行为。
 
-Benchmark 页支持两种压测入口：`Run SET/GET` 直接调用 `redis-benchmark` 测试当前连接服务，`Run Matrix` 调用 `scripts/benchmark.sh`，按 `1 / 当前值` 对比 `io_threads` 和 `cache_shards` 组合。
+压测入口支持两种模式：运行 SET/GET 直接调用 `redis-benchmark` 测试当前连接服务，运行矩阵压测调用 `scripts/benchmark.sh`，按 `1 / 当前值` 对比 `io_threads` 和 `cache_shards` 组合。
 
 ## 本地运行
 
@@ -97,7 +101,7 @@ redis-cli -p 6366 -a change-me SET foo bar
 ```bash
 ./build/miniredis \
   --acl-user admin:adminpass:admin \
-  --acl-user 'app password=apppass role=readwrite commands=get,set,mget,expire,ttl keys=app:*' \
+  --acl-user 'app password=apppass role=readwrite commands=ping,get,set,setnx,mget,getdel,getex,append,strlen,type,incr,decr,incrby,decrby,del,exists,expire,pexpire,persist,ttl,pttl,info,slowlog,command,acl,bgrewriteaof keys=app:* enabled=true' \
   --acl-user auditor:auditpass:readonly
 
 redis-cli -p 6366 AUTH app apppass
@@ -114,7 +118,7 @@ redis-cli -p 6366 ACL GETUSER app
 
 ```text
 user = admin password=adminpass role=admin
-user = app password=apppass role=readwrite commands=get,set,mget,expire,ttl keys=app:*
+user = app password=apppass role=readwrite commands=ping,get,set,setnx,mget,getdel,getex,append,strlen,type,incr,decr,incrby,decrby,del,exists,expire,pexpire,persist,ttl,pttl,info,slowlog,command,acl,bgrewriteaof keys=app:* enabled=true
 user = auditor password=auditpass role=readonly
 ```
 
@@ -180,7 +184,7 @@ redis-cli -p 6366 -a "${MINIREDIS_REQUIREPASS:-change-me}" INFO stats
 --replicaof ip:port       以只读 replica 模式跟随指定 master
 --replicas a:port,b:port  master 侧写命令转发的 replica 列表
 --requirepass password    启用 AUTH
---acl-user spec 添加 ACL 用户，支持 user:pass:role，也支持 user password=pass role=readwrite commands=get,set keys=app:* enabled=true，可重复传
+--acl-user spec 添加 ACL 用户，支持 user:pass:role，也支持 user password=pass role=readwrite commands=get,set,mget keys=app:* enabled=true，可重复传
 --max-request-bytes bytes 单连接最大请求缓冲，默认 16777216
 --max-key-bytes bytes     最大 key 长度，默认 4096
 --max-value-bytes bytes   最大 value 长度，默认 16777216

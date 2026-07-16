@@ -1,5 +1,7 @@
 #include "monitor_window.hpp"
 
+#include <QAction>
+#include <QActionGroup>
 #include <QByteArrayView>
 #include <QCheckBox>
 #include <QComboBox>
@@ -18,6 +20,8 @@
 #include <QJsonValue>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMenu>
+#include <QMenuBar>
 #include <QPlainTextEdit>
 #include <QPixmap>
 #include <QProcess>
@@ -28,8 +32,10 @@
 #include <QSplitter>
 #include <QSpinBox>
 #include <QStackedWidget>
+#include <QTextBlock>
 #include <QTextCursor>
 #include <QTimer>
+#include <QToolBar>
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
 #include <QVBoxLayout>
@@ -129,6 +135,14 @@ QStringList maskedProcessArgs(QStringList args) {
     return args;
 }
 
+QString demoAclUserSpec() {
+    return "app password=apppass role=readwrite "
+           "commands=ping,get,set,setnx,mget,getdel,getex,append,strlen,type,"
+           "incr,decr,incrby,decrby,del,exists,expire,pexpire,persist,"
+           "ttl,pttl,info,slowlog,command,acl,bgrewriteaof "
+           "keys=app:* enabled=true";
+}
+
 QProcessEnvironment processEnvironmentWithPassword(const QString& password) {
     QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
     if (!password.isEmpty()) {
@@ -143,7 +157,10 @@ MonitorWindow::MonitorWindow(QWidget* parent)
     : QMainWindow(parent),
       stats_timer_(new QTimer(this)),
       server_process_(new QProcess(this)),
-      benchmark_process_(new QProcess(this)) {
+      benchmark_process_(new QProcess(this)),
+      script_process_(new QProcess(this)),
+      resource_panel_(nullptr),
+      inspector_panel_(nullptr) {
     setWindowTitle("MiniRedis 运维控制台");
     resize(1320, 860);
     setMinimumSize(1120, 720);
@@ -293,15 +310,9 @@ MonitorWindow::MonitorWindow(QWidget* parent)
 
     QWidget* central = new QWidget(this);
     QVBoxLayout* root = new QVBoxLayout(central);
-    root->setContentsMargins(14, 12, 14, 14);
-    root->setSpacing(12);
+    root->setContentsMargins(8, 8, 8, 8);
+    root->setSpacing(8);
     initConnectionControls(central);
-
-    QFrame* nav_frame = new QFrame(central);
-    nav_frame->setProperty("role", "nav");
-    QHBoxLayout* nav = new QHBoxLayout(nav_frame);
-    nav->setContentsMargins(8, 6, 8, 6);
-    nav->setSpacing(4);
 
     pages_ = new QStackedWidget(central);
     pages_->addWidget(buildConsoleTab());
@@ -313,33 +324,10 @@ MonitorWindow::MonitorWindow(QWidget* parent)
     pages_->addWidget(buildMetricsTab());
     pages_->addWidget(buildBenchmarkTab());
 
-    auto addNavButton = [this, nav](const QString& text, int index) {
-        QPushButton* button = new QPushButton(text, this);
-        button->setProperty("nav", true);
-        button->setProperty("pageIndex", index);
-        button->setProperty("navSelected", index == 0);
-        nav->addWidget(button);
-        connect(button, &QPushButton::clicked, this, [this, index]() {
-            pages_->setCurrentIndex(index);
-        });
-    };
-
-    addNavButton("控制台", 0);
-    addNavButton("演示中心", 1);
-    addNavButton("服务管理", 2);
-    addNavButton("集群路由", 3);
-    addNavButton("运行指标", 4);
-    addNavButton("诊断工具", 5);
-    addNavButton("监控指标", 6);
-    addNavButton("压测", 7);
-    nav->addStretch(1);
-    connect(pages_, &QStackedWidget::currentChanged, this, [nav_frame](int index) {
-        const auto buttons = nav_frame->findChildren<QPushButton*>();
-        for (QPushButton* nav_button : buttons) {
-            bool selected = nav_button->property("pageIndex").toInt() == index;
-            nav_button->setProperty("navSelected", selected);
-            nav_button->style()->unpolish(nav_button);
-            nav_button->style()->polish(nav_button);
+    buildMenus();
+    connect(pages_, &QStackedWidget::currentChanged, this, [this](int index) {
+        for (QAction* action : page_actions_) {
+            action->setChecked(action->data().toInt() == index);
         }
     });
 
@@ -349,14 +337,17 @@ MonitorWindow::MonitorWindow(QWidget* parent)
     workspace_layout->setContentsMargins(0, 0, 0, 0);
     workspace_layout->addWidget(pages_);
 
-    root->addWidget(nav_frame);
     root->addWidget(workspace, 1);
     setCentralWidget(central);
 
     connect(&resp_client_, &RespClient::connected, this, [this]() {
         updateConnectionState(true);
         if (!password_edit_->text().isEmpty()) {
-            sendCommand({"AUTH", password_edit_->text()});
+            if (auth_user_edit_ && !auth_user_edit_->text().trimmed().isEmpty()) {
+                sendCommand({"AUTH", auth_user_edit_->text().trimmed(), password_edit_->text()});
+            } else {
+                sendCommand({"AUTH", password_edit_->text()});
+            }
         }
         if (!pending_moved_retry_.isEmpty()) {
             QStringList retry = pending_moved_retry_;
@@ -439,6 +430,24 @@ MonitorWindow::MonitorWindow(QWidget* parent)
         appendBenchmarkLog("redis-benchmark 错误：" + benchmark_process_->errorString());
     });
 
+    connect(script_process_, &QProcess::readyReadStandardOutput, this, [this]() {
+        appendDemoLog(QString::fromUtf8(script_process_->readAllStandardOutput()));
+    });
+    connect(script_process_, &QProcess::readyReadStandardError, this, [this]() {
+        appendDemoLog(QString::fromUtf8(script_process_->readAllStandardError()));
+    });
+    connect(script_process_, &QProcess::started, this, [this]() {
+        appendDemoLog("脚本任务已启动");
+    });
+    connect(script_process_, &QProcess::finished, this, [this](int exit_code, QProcess::ExitStatus status) {
+        appendDemoLog(QString("脚本任务已退出：code=%1 status=%2")
+                          .arg(exit_code)
+                          .arg(status == QProcess::NormalExit ? "正常退出" : "异常退出"));
+    });
+    connect(script_process_, &QProcess::errorOccurred, this, [this](QProcess::ProcessError) {
+        appendDemoLog("脚本任务错误：" + script_process_->errorString());
+    });
+
     connect(stats_timer_, &QTimer::timeout, this, [this]() {
         stats_client_.fetchStats(host(), statsPort());
         stats_client_.fetchMetrics(host(), statsPort());
@@ -451,6 +460,7 @@ MonitorWindow::MonitorWindow(QWidget* parent)
 }
 
 MonitorWindow::~MonitorWindow() {
+    stopScriptTool();
     stopBenchmark();
     stopClusterDemo();
     stopServer();
@@ -661,6 +671,216 @@ bool MonitorWindow::exportScreenshots(const QString& directory) {
     return ok;
 }
 
+void MonitorWindow::buildMenus() {
+    menuBar()->clear();
+    page_actions_.clear();
+
+    QMenu* file_menu = menuBar()->addMenu("文件");
+    QAction* add_connection = file_menu->addAction("添加连接...");
+    QAction* quit = file_menu->addAction("退出");
+
+    QMenu* connection_menu = menuBar()->addMenu("连接");
+    QAction* connect_action = connection_menu->addAction("连接当前服务");
+    QAction* disconnect_action = connection_menu->addAction("断开连接");
+    QAction* ping_action = connection_menu->addAction("PING");
+    QAction* refresh_action = connection_menu->addAction("刷新状态");
+
+    QMenu* run_menu = menuBar()->addMenu("运行");
+    QAction* run_script_action = run_menu->addAction("运行选中命令");
+    QAction* clear_output_action = run_menu->addAction("清空控制台输出");
+    QAction* rewrite_aof_action = run_menu->addAction("执行 BGREWRITEAOF");
+
+    QMenu* view_menu = menuBar()->addMenu("视图");
+    QMenu* server_menu = menuBar()->addMenu("服务");
+    QMenu* cluster_menu = menuBar()->addMenu("集群");
+    QMenu* monitor_menu = menuBar()->addMenu("监控");
+    QMenu* tools_menu = menuBar()->addMenu("工具");
+    QMenu* help_menu = menuBar()->addMenu("帮助");
+
+    QToolBar* toolbar = addToolBar("主工具栏");
+    toolbar->setMovable(false);
+    toolbar->setFloatable(false);
+    toolbar->setToolButtonStyle(Qt::ToolButtonTextOnly);
+
+    toolbar->addAction(add_connection);
+    toolbar->addSeparator();
+
+    QActionGroup* page_group = new QActionGroup(this);
+    page_group->setExclusive(true);
+    auto addPageAction = [this, page_group, toolbar](QMenu* menu, const QString& text, int index,
+                                                     bool pin_to_toolbar = false) {
+        QAction* action = new QAction(text, this);
+        action->setCheckable(index == 0);
+        action->setData(index);
+        if (index == 0) {
+            page_group->addAction(action);
+            page_actions_.push_back(action);
+        }
+        menu->addAction(action);
+        if (pin_to_toolbar) toolbar->addAction(action);
+        connect(action, &QAction::triggered, this, [this, index]() {
+            if (index == 0) {
+                switchPage(0);
+            } else {
+                QAction* source = qobject_cast<QAction*>(sender());
+                openToolDialog(index, source ? source->text() : "工具窗口");
+            }
+        });
+        return action;
+    };
+
+    QAction* show_resource_action = view_menu->addAction("显示资源管理器");
+    show_resource_action->setCheckable(true);
+    show_resource_action->setChecked(resource_panel_ && resource_panel_->isVisible());
+    QAction* show_inspector_action = view_menu->addAction("显示命令参考");
+    show_inspector_action->setCheckable(true);
+    show_inspector_action->setChecked(inspector_panel_ && inspector_panel_->isVisible());
+    view_menu->addSeparator();
+
+    addPageAction(view_menu, "控制台", 0, true)->setChecked(true);
+    addPageAction(tools_menu, "演示中心", 1);
+    addPageAction(server_menu, "服务管理", 2);
+    addPageAction(cluster_menu, "集群路由", 3);
+    addPageAction(monitor_menu, "运行指标", 4);
+    addPageAction(monitor_menu, "诊断工具", 5);
+    addPageAction(monitor_menu, "Prometheus 指标", 6);
+    addPageAction(tools_menu, "压测", 7);
+
+    toolbar->addSeparator();
+    toolbar->addAction(connect_action);
+    toolbar->addAction(ping_action);
+    toolbar->addAction(refresh_action);
+
+    QAction* start_server_action = server_menu->addAction("启动服务");
+    QAction* stop_server_action = server_menu->addAction("停止服务");
+    QAction* restart_server_action = server_menu->addAction("重启服务");
+    QAction* start_replica_action = server_menu->addAction("启动主从演示");
+    QAction* start_cluster_action = cluster_menu->addAction("启动三节点集群");
+    QAction* stop_cluster_action = cluster_menu->addAction("停止集群演示");
+    QAction* fail_cluster_action = cluster_menu->addAction("模拟节点故障");
+    QAction* cluster_info_action = cluster_menu->addAction("CLUSTER INFO");
+    QAction* cluster_nodes_action = cluster_menu->addAction("CLUSTER NODES");
+    QAction* health_action = monitor_menu->addAction("健康检查 /healthz");
+    QAction* ready_action = monitor_menu->addAction("就绪检查 /readyz");
+    QAction* stats_action = monitor_menu->addAction("获取 /stats");
+    QAction* metrics_action = monitor_menu->addAction("获取 /metrics");
+    QAction* benchmark_action = tools_menu->addAction("运行 SET/GET 压测");
+    QAction* smoke_script_action = tools_menu->addAction("运行 smoke 测试");
+    QAction* recovery_script_action = tools_menu->addAction("运行 recovery/soak 测试");
+    QAction* replica_script_action = tools_menu->addAction("运行 replica 脚本");
+    QAction* cluster_script_action = tools_menu->addAction("运行 cluster 脚本");
+    QAction* help_action = help_menu->addAction("插入常用命令模板");
+
+    connect(add_connection, &QAction::triggered, this, &MonitorWindow::showConnectionDialog);
+    connect(show_resource_action, &QAction::toggled, this, [this](bool checked) {
+        if (resource_panel_) resource_panel_->setVisible(checked);
+    });
+    connect(show_inspector_action, &QAction::toggled, this, [this](bool checked) {
+        if (inspector_panel_) inspector_panel_->setVisible(checked);
+    });
+    connect(quit, &QAction::triggered, this, &QWidget::close);
+    connect(connect_action, &QAction::triggered, this, [this]() {
+        resp_client_.connectToServer(host(), respPort());
+        stats_timer_->start();
+    });
+    connect(disconnect_action, &QAction::triggered, this, [this]() {
+        stats_timer_->stop();
+        resp_client_.disconnectFromServer();
+    });
+    connect(ping_action, &QAction::triggered, this, [this]() { sendCommand({"PING"}); });
+    connect(refresh_action, &QAction::triggered, this, [this]() {
+        stats_client_.fetchStats(host(), statsPort());
+        stats_client_.fetchMetrics(host(), statsPort());
+    });
+    connect(run_script_action, &QAction::triggered, this, &MonitorWindow::executeConsoleScript);
+    connect(clear_output_action, &QAction::triggered, this, [this]() {
+        if (console_output_) console_output_->clear();
+    });
+    connect(rewrite_aof_action, &QAction::triggered, this, [this]() { sendCommand({"BGREWRITEAOF"}); });
+    connect(start_server_action, &QAction::triggered, this, &MonitorWindow::startServer);
+    connect(stop_server_action, &QAction::triggered, this, &MonitorWindow::stopServer);
+    connect(restart_server_action, &QAction::triggered, this, &MonitorWindow::restartServer);
+    connect(start_replica_action, &QAction::triggered, this, &MonitorWindow::startReplicaDemo);
+    connect(start_cluster_action, &QAction::triggered, this, &MonitorWindow::startClusterDemo);
+    connect(stop_cluster_action, &QAction::triggered, this, &MonitorWindow::stopClusterDemo);
+    connect(fail_cluster_action, &QAction::triggered, this, &MonitorWindow::failClusterDemoNode);
+    connect(cluster_info_action, &QAction::triggered, this, [this]() { sendCommand({"CLUSTER", "INFO"}); });
+    connect(cluster_nodes_action, &QAction::triggered, this, [this]() { sendCommand({"CLUSTER", "NODES"}); });
+    connect(health_action, &QAction::triggered, this, [this]() { stats_client_.fetchHealthz(host(), statsPort()); });
+    connect(ready_action, &QAction::triggered, this, [this]() { stats_client_.fetchReadyz(host(), statsPort()); });
+    connect(stats_action, &QAction::triggered, this, [this]() {
+        stats_client_.fetchStatsText(host(), statsPort());
+        openToolDialog(5, "诊断工具");
+    });
+    connect(metrics_action, &QAction::triggered, this, [this]() {
+        stats_client_.fetchMetrics(host(), statsPort());
+        openToolDialog(6, "Prometheus 指标");
+    });
+    connect(benchmark_action, &QAction::triggered, this, [this]() {
+        runBenchmark();
+        openToolDialog(7, "压测");
+    });
+    connect(smoke_script_action, &QAction::triggered, this, [this]() {
+        runScriptTool("tests/integration/smoke.sh",
+                      {server_path_edit_->text().trimmed().isEmpty()
+                           ? "build/miniredis"
+                           : server_path_edit_->text().trimmed()});
+        openToolDialog(1, "演示中心");
+    });
+    connect(recovery_script_action, &QAction::triggered, this, [this]() {
+        runScriptTool("scripts/recovery_soak.sh");
+        openToolDialog(1, "演示中心");
+    });
+    connect(replica_script_action, &QAction::triggered, this, [this]() {
+        runScriptTool("scripts/replica_demo.sh", {"smoke"});
+        openToolDialog(1, "演示中心");
+    });
+    connect(cluster_script_action, &QAction::triggered, this, [this]() {
+        runScriptTool("scripts/cluster_demo.sh", {"smoke"});
+        openToolDialog(1, "演示中心");
+    });
+    connect(help_action, &QAction::triggered, this, [this]() {
+        switchPage(0);
+        insertConsoleTemplate("PING\nINFO stats\nCLUSTER INFO\nSLOWLOG LEN");
+    });
+}
+
+void MonitorWindow::openToolDialog(int index, const QString& title) {
+    if (!pages_ || index <= 0 || index >= pages_->count()) {
+        switchPage(0);
+        return;
+    }
+
+    QWidget* page = pages_->widget(index);
+    if (!page) return;
+
+    pages_->removeWidget(page);
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(title);
+    dialog.resize(1120, 760);
+    dialog.setModal(false);
+
+    QVBoxLayout* layout = new QVBoxLayout(&dialog);
+    layout->setContentsMargins(10, 10, 10, 10);
+    layout->addWidget(page);
+    page->setVisible(true);
+    page->show();
+
+    dialog.exec();
+
+    layout->removeWidget(page);
+    page->setParent(pages_);
+    pages_->insertWidget(index, page);
+    page->hide();
+    switchPage(0);
+}
+
+void MonitorWindow::switchPage(int index) {
+    if (!pages_ || index < 0 || index >= pages_->count()) return;
+    pages_->setCurrentIndex(index);
+}
+
 void MonitorWindow::initConnectionControls(QWidget* parent) {
     host_edit_ = new QLineEdit("127.0.0.1", parent);
     resp_port_spin_ = new QSpinBox(parent);
@@ -669,6 +889,7 @@ void MonitorWindow::initConnectionControls(QWidget* parent) {
     stats_port_spin_ = new QSpinBox(parent);
     stats_port_spin_->setRange(1, 65535);
     stats_port_spin_->setValue(8080);
+    auth_user_edit_ = new QLineEdit(parent);
     password_edit_ = new QLineEdit(parent);
     password_edit_->setEchoMode(QLineEdit::Password);
     follow_moved_check_ = new QCheckBox("自动跟随 MOVED", parent);
@@ -680,6 +901,7 @@ void MonitorWindow::initConnectionControls(QWidget* parent) {
     host_edit_->hide();
     resp_port_spin_->hide();
     stats_port_spin_->hide();
+    auth_user_edit_->hide();
     password_edit_->hide();
     follow_moved_check_->hide();
 }
@@ -711,6 +933,8 @@ void MonitorWindow::showConnectionDialog() {
     QSpinBox* stats_port = new QSpinBox(&dialog);
     stats_port->setRange(1, 65535);
     stats_port->setValue(stats_port_spin_->value());
+    QLineEdit* auth_user = new QLineEdit(auth_user_edit_->text(), &dialog);
+    auth_user->setPlaceholderText("ACL 用户名，可留空使用旧版 AUTH");
     QLineEdit* password = new QLineEdit(password_edit_->text(), &dialog);
     password->setEchoMode(QLineEdit::Password);
     QCheckBox* follow_moved = new QCheckBox("自动跟随 MOVED 重定向", &dialog);
@@ -722,9 +946,11 @@ void MonitorWindow::showConnectionDialog() {
     form->addWidget(resp_port, 0, 3);
     form->addWidget(new QLabel("监控端口", &dialog), 1, 0);
     form->addWidget(stats_port, 1, 1);
-    form->addWidget(new QLabel("密码", &dialog), 1, 2);
-    form->addWidget(password, 1, 3);
-    form->addWidget(follow_moved, 2, 1, 1, 3);
+    form->addWidget(new QLabel("用户名", &dialog), 1, 2);
+    form->addWidget(auth_user, 1, 3);
+    form->addWidget(new QLabel("密码", &dialog), 2, 0);
+    form->addWidget(password, 2, 1, 1, 3);
+    form->addWidget(follow_moved, 3, 1, 1, 3);
     form->setColumnStretch(1, 1);
     form->setColumnStretch(3, 1);
     root->addLayout(form);
@@ -744,10 +970,11 @@ void MonitorWindow::showConnectionDialog() {
     actions->addWidget(cancel_btn);
     root->addLayout(actions);
 
-    auto apply = [this, host, resp_port, stats_port, password, follow_moved]() {
+    auto apply = [this, host, resp_port, stats_port, auth_user, password, follow_moved]() {
         host_edit_->setText(host->text().trimmed().isEmpty() ? "127.0.0.1" : host->text().trimmed());
         resp_port_spin_->setValue(resp_port->value());
         stats_port_spin_->setValue(stats_port->value());
+        auth_user_edit_->setText(auth_user->text().trimmed());
         password_edit_->setText(password->text());
         follow_moved_check_->setChecked(follow_moved->isChecked());
     };
@@ -783,8 +1010,9 @@ QWidget* MonitorWindow::buildConsoleTab() {
     root->setSpacing(10);
 
     QHBoxLayout* toolbar = new QHBoxLayout();
-    QPushButton* run_btn = new QPushButton("执行选中/全部", page);
-    run_btn->setToolTip("有选中文本时只执行选中内容；没有选中时执行编辑器全部内容");
+    QPushButton* run_btn = new QPushButton("运行选中/当前行", page);
+    run_btn->setToolTip("有选中文本时执行选中内容；没有选中时执行光标所在行");
+    QPushButton* run_all_btn = new QPushButton("运行全部", page);
     QPushButton* clear_output_btn = new QPushButton("清空输出", page);
     QPushButton* clear_editor_btn = new QPushButton("清空编辑器", page);
     QPushButton* ping_btn = new QPushButton("PING", page);
@@ -811,6 +1039,8 @@ QWidget* MonitorWindow::buildConsoleTab() {
         "CLUSTER NODES",
         "CLUSTER MEET host:port",
         "CLUSTER FORGET host:port",
+        "CLUSTER FAILOVER TAKEOVER",
+        "ACL GETUSER default",
         "BGREWRITEAOF"
     });
     console_history_combo_ = new QComboBox(page);
@@ -818,6 +1048,7 @@ QWidget* MonitorWindow::buildConsoleTab() {
     console_history_combo_->setMinimumWidth(180);
     run_btn->setProperty("class", "primary");
     toolbar->addWidget(run_btn);
+    toolbar->addWidget(run_all_btn);
     toolbar->addWidget(clear_output_btn);
     toolbar->addWidget(clear_editor_btn);
     toolbar->addSpacing(12);
@@ -830,6 +1061,7 @@ QWidget* MonitorWindow::buildConsoleTab() {
 
     QSplitter* horizontal = new QSplitter(Qt::Horizontal, page);
     QWidget* resource_shell = new QWidget(horizontal);
+    resource_panel_ = resource_shell;
     resource_shell->setMinimumWidth(260);
     QVBoxLayout* resource_layout = new QVBoxLayout(resource_shell);
     resource_layout->setContentsMargins(0, 0, 0, 0);
@@ -890,10 +1122,12 @@ QWidget* MonitorWindow::buildConsoleTab() {
     addTreeCommand(cluster, "CLUSTER MEET", "CLUSTER MEET 127.0.0.1:6368");
     addTreeCommand(cluster, "CLUSTER FORGET", "CLUSTER FORGET 127.0.0.1:6368");
     addTreeCommand(cluster, "CLUSTER MIGRATE", "CLUSTER MIGRATE 42 127.0.0.1:6367");
+    addTreeCommand(cluster, "CLUSTER FAILOVER", "CLUSTER FAILOVER TAKEOVER");
     QTreeWidgetItem* acl = new QTreeWidgetItem(current, {"认证 / ACL"});
-    addTreeCommand(acl, "AUTH", "AUTH change-me");
+    addTreeCommand(acl, "AUTH", "AUTH app apppass");
     addTreeCommand(acl, "ACL WHOAMI", "ACL WHOAMI");
     addTreeCommand(acl, "ACL LIST", "ACL LIST");
+    addTreeCommand(acl, "ACL GETUSER", "ACL GETUSER default");
     resource_tree_->expandAll();
 
     QSplitter* vertical = new QSplitter(Qt::Vertical, horizontal);
@@ -924,6 +1158,7 @@ QWidget* MonitorWindow::buildConsoleTab() {
     vertical->setStretchFactor(1, 2);
 
     QWidget* inspector = new QWidget(horizontal);
+    inspector_panel_ = inspector;
     inspector->setMinimumWidth(310);
     QVBoxLayout* inspector_layout = new QVBoxLayout(inspector);
     inspector_layout->setContentsMargins(0, 0, 0, 0);
@@ -978,6 +1213,8 @@ QWidget* MonitorWindow::buildConsoleTab() {
         "CLUSTER COUNTKEYSINSLOT slot\n"
         "CLUSTER MEET 节点 | FORGET 节点\n"
         "CLUSTER MIGRATE slot 目标节点\n"
+        "CLUSTER FAILOVER TAKEOVER\n"
+        "ACL WHOAMI | LIST | GETUSER 用户名\n"
         "ASKING");
 
     inspector_layout->addWidget(summary);
@@ -991,17 +1228,32 @@ QWidget* MonitorWindow::buildConsoleTab() {
     horizontal->setStretchFactor(0, 0);
     horizontal->setStretchFactor(1, 1);
     horizontal->setStretchFactor(2, 0);
+    inspector->hide();
 
     root->addLayout(toolbar);
     root->addWidget(horizontal, 1);
 
     connect(run_btn, &QPushButton::clicked, this, &MonitorWindow::executeConsoleScript);
+    connect(run_all_btn, &QPushButton::clicked, this, [this]() {
+        if (!console_editor_) return;
+        QTextCursor cursor = console_editor_->textCursor();
+        cursor.select(QTextCursor::Document);
+        console_editor_->setTextCursor(cursor);
+        executeConsoleScript();
+    });
     connect(clear_output_btn, &QPushButton::clicked, console_output_, &QPlainTextEdit::clear);
     connect(clear_editor_btn, &QPushButton::clicked, console_editor_, &QPlainTextEdit::clear);
     connect(ping_btn, &QPushButton::clicked, this, [this]() { insertConsoleTemplate("PING"); });
     connect(auth_btn, &QPushButton::clicked, this, [this]() {
         QString pass = password_edit_ ? password_edit_->text() : "";
-        insertConsoleTemplate(pass.isEmpty() ? "AUTH change-me" : "AUTH " + pass);
+        QString user = auth_user_edit_ ? auth_user_edit_->text().trimmed() : "";
+        if (pass.isEmpty()) {
+            insertConsoleTemplate("AUTH app apppass");
+        } else if (!user.isEmpty()) {
+            insertConsoleTemplate("AUTH " + user + " " + pass);
+        } else {
+            insertConsoleTemplate("AUTH " + pass);
+        }
     });
     connect(stats_btn, &QPushButton::clicked, this, [this]() {
         stats_client_.fetchStats(host(), statsPort());
@@ -1080,6 +1332,23 @@ QWidget* MonitorWindow::buildDemoLabTab() {
     cluster_btn->setProperty("class", "primary");
     cluster_layout->addWidget(cluster_btn);
 
+    auto [script_box, script_layout] = makeCard(
+        "脚本验证",
+        "从 Qt 端运行 smoke、recovery/soak、replica 和 cluster 脚本，覆盖协议、恢复、复制和集群路由的自动验证。");
+    QGridLayout* script_grid = new QGridLayout();
+    QPushButton* smoke_btn = new QPushButton("Smoke 测试", script_box);
+    QPushButton* recovery_btn = new QPushButton("Recovery/Soak", script_box);
+    QPushButton* replica_script_btn = new QPushButton("Replica 脚本", script_box);
+    QPushButton* cluster_script_btn = new QPushButton("Cluster 脚本", script_box);
+    QPushButton* stop_script_btn = new QPushButton("停止脚本", script_box);
+    stop_script_btn->setProperty("class", "danger");
+    script_grid->addWidget(smoke_btn, 0, 0);
+    script_grid->addWidget(recovery_btn, 0, 1);
+    script_grid->addWidget(replica_script_btn, 1, 0);
+    script_grid->addWidget(cluster_script_btn, 1, 1);
+    script_grid->addWidget(stop_script_btn, 2, 0, 1, 2);
+    script_layout->addLayout(script_grid);
+
     QPushButton* stop_all_btn = new QPushButton("停止所有演示进程", page);
     stop_all_btn->setProperty("class", "danger");
     QPushButton* clear_btn = new QPushButton("清空演示日志", page);
@@ -1087,6 +1356,7 @@ QWidget* MonitorWindow::buildDemoLabTab() {
     cards->addWidget(replica_box, 0, 0);
     cards->addWidget(aof_box, 0, 1);
     cards->addWidget(cluster_box, 0, 2);
+    cards->addWidget(script_box, 1, 0, 1, 3);
     cards->setColumnStretch(0, 1);
     cards->setColumnStretch(1, 1);
     cards->setColumnStretch(2, 1);
@@ -1108,8 +1378,25 @@ QWidget* MonitorWindow::buildDemoLabTab() {
     connect(repl_btn, &QPushButton::clicked, this, &MonitorWindow::runReplicationPsyncDemo);
     connect(aof_btn, &QPushButton::clicked, this, &MonitorWindow::runAofRecoveryDemo);
     connect(cluster_btn, &QPushButton::clicked, this, &MonitorWindow::runClusterFailoverDemo);
+    connect(smoke_btn, &QPushButton::clicked, this, [this]() {
+        runScriptTool("tests/integration/smoke.sh",
+                      {server_path_edit_->text().trimmed().isEmpty()
+                           ? "build/miniredis"
+                           : server_path_edit_->text().trimmed()});
+    });
+    connect(recovery_btn, &QPushButton::clicked, this, [this]() {
+        runScriptTool("scripts/recovery_soak.sh");
+    });
+    connect(replica_script_btn, &QPushButton::clicked, this, [this]() {
+        runScriptTool("scripts/replica_demo.sh", {"smoke"});
+    });
+    connect(cluster_script_btn, &QPushButton::clicked, this, [this]() {
+        runScriptTool("scripts/cluster_demo.sh", {"smoke"});
+    });
+    connect(stop_script_btn, &QPushButton::clicked, this, &MonitorWindow::stopScriptTool);
     connect(stop_all_btn, &QPushButton::clicked, this, [this]() {
         appendDemoLog("正在停止所有演示进程...");
+        stopScriptTool();
         stopBenchmark();
         stopClusterDemo();
         stopServer();
@@ -1137,6 +1424,8 @@ QWidget* MonitorWindow::buildServerTab() {
     replicaof_edit_->setPlaceholderText("主节点 ip:port，主节点留空");
     replicas_edit_ = new QLineEdit("", config_box);
     replicas_edit_->setPlaceholderText("副本1:port,副本2:port");
+    acl_users_edit_ = new QLineEdit("", config_box);
+    acl_users_edit_->setPlaceholderText(demoAclUserSpec() + "；多用户用 ; 分隔");
     node_addr_edit_ = new QLineEdit("127.0.0.1:6366", config_box);
     nodes_edit_ = new QLineEdit("127.0.0.1:6366", config_box);
     server_resp_port_spin_ = new QSpinBox(config_box);
@@ -1183,6 +1472,7 @@ QWidget* MonitorWindow::buildServerTab() {
     QPushButton* browse_snapshot_btn = new QPushButton("选择", config_box);
     QPushButton* browse_aof_btn = new QPushButton("选择", config_box);
     QPushButton* browse_cluster_config_btn = new QPushButton("选择", config_box);
+    QPushButton* demo_acl_btn = new QPushButton("填入演示 ACL", config_box);
     QPushButton* start_btn = new QPushButton("启动服务", config_box);
     QPushButton* stop_btn = new QPushButton("停止服务", config_box);
     QPushButton* restart_btn = new QPushButton("重启服务", config_box);
@@ -1261,6 +1551,9 @@ QWidget* MonitorWindow::buildServerTab() {
     persistence_grid->addWidget(makeFieldLabel("AOF 文件"), 3, 0);
     persistence_grid->addWidget(appendonly_file_edit_, 3, 1, 1, 2);
     persistence_grid->addWidget(browse_aof_btn, 3, 3);
+    persistence_grid->addWidget(makeFieldLabel("ACL 用户"), 4, 0);
+    persistence_grid->addWidget(acl_users_edit_, 4, 1, 1, 2);
+    persistence_grid->addWidget(demo_acl_btn, 4, 3);
     left_column->addLayout(persistence_grid);
 
     QGridLayout* runtime_grid = new QGridLayout();
@@ -1347,6 +1640,9 @@ QWidget* MonitorWindow::buildServerTab() {
         QString path = QFileDialog::getSaveFileName(this, "选择集群配置文件", QDir::currentPath());
         if (!path.isEmpty()) cluster_config_file_edit_->setText(path);
     });
+    connect(demo_acl_btn, &QPushButton::clicked, this, [this]() {
+        acl_users_edit_->setText(demoAclUserSpec());
+    });
     connect(start_btn, &QPushButton::clicked, this, &MonitorWindow::startServer);
     connect(stop_btn, &QPushButton::clicked, this, &MonitorWindow::stopServer);
     connect(restart_btn, &QPushButton::clicked, this, &MonitorWindow::restartServer);
@@ -1382,6 +1678,7 @@ QWidget* MonitorWindow::buildClusterTab() {
     QPushButton* info_section_btn = new QPushButton("INFO 集群", page);
     QPushButton* nodes_btn = new QPushButton("CLUSTER NODES", page);
     QPushButton* slots_btn = new QPushButton("CLUSTER SLOTS", page);
+    QPushButton* slotmap_btn = new QPushButton("CLUSTER SLOTMAP", page);
     QPushButton* myid_btn = new QPushButton("CLUSTER MYID", page);
     QPushButton* keyslot_btn = new QPushButton("计算槽位", page);
     QPushButton* count_slot_btn = new QPushButton("统计槽位 Key", page);
@@ -1392,6 +1689,9 @@ QWidget* MonitorWindow::buildClusterTab() {
     QPushButton* setslot_migrating_btn = new QPushButton("MIGRATING", page);
     QPushButton* setslot_importing_btn = new QPushButton("IMPORTING", page);
     QPushButton* setslot_stable_btn = new QPushButton("STABLE", page);
+    QPushButton* meet_btn = new QPushButton("MEET", page);
+    QPushButton* forget_btn = new QPushButton("FORGET", page);
+    QPushButton* failover_btn = new QPushButton("FAILOVER TAKEOVER", page);
     cluster_output_ = new QPlainTextEdit(page);
     cluster_output_->setReadOnly(true);
 
@@ -1399,7 +1699,8 @@ QWidget* MonitorWindow::buildClusterTab() {
     controls->addWidget(info_section_btn, 0, 1);
     controls->addWidget(nodes_btn, 0, 2);
     controls->addWidget(slots_btn, 0, 3);
-    controls->addWidget(myid_btn, 0, 4);
+    controls->addWidget(slotmap_btn, 0, 4);
+    controls->addWidget(myid_btn, 0, 5);
     controls->addWidget(new QLabel("Key"), 1, 0);
     controls->addWidget(key_edit, 1, 1, 1, 2);
     controls->addWidget(keyslot_btn, 1, 3);
@@ -1415,6 +1716,9 @@ QWidget* MonitorWindow::buildClusterTab() {
     controls->addWidget(setslot_migrating_btn, 4, 1);
     controls->addWidget(setslot_importing_btn, 4, 2);
     controls->addWidget(setslot_stable_btn, 4, 3);
+    controls->addWidget(meet_btn, 4, 4);
+    controls->addWidget(forget_btn, 4, 5);
+    controls->addWidget(failover_btn, 5, 1, 1, 2);
     layout->addLayout(controls);
     layout->addWidget(cluster_output_, 1);
 
@@ -1422,6 +1726,7 @@ QWidget* MonitorWindow::buildClusterTab() {
     connect(info_section_btn, &QPushButton::clicked, this, [this]() { sendCommand({"INFO", "cluster"}); });
     connect(nodes_btn, &QPushButton::clicked, this, [this]() { sendCommand({"CLUSTER", "NODES"}); });
     connect(slots_btn, &QPushButton::clicked, this, [this]() { sendCommand({"CLUSTER", "SLOTS"}); });
+    connect(slotmap_btn, &QPushButton::clicked, this, [this]() { sendCommand({"CLUSTER", "SLOTMAP"}); });
     connect(myid_btn, &QPushButton::clicked, this, [this]() { sendCommand({"CLUSTER", "MYID"}); });
     connect(keyslot_btn, &QPushButton::clicked, this, [this, key_edit]() {
         QString key = key_edit->text();
@@ -1516,6 +1821,25 @@ QWidget* MonitorWindow::buildClusterTab() {
     });
     connect(setslot_stable_btn, &QPushButton::clicked, this, [this, slot_spin]() {
         sendCommand({"CLUSTER", "SETSLOT", QString::number(slot_spin->value()), "STABLE"});
+    });
+    connect(meet_btn, &QPushButton::clicked, this, [this, target_node_edit]() {
+        QString target = target_node_edit->text().trimmed();
+        if (target.isEmpty()) {
+            appendLog("ERR CLUSTER MEET 需要填写目标节点");
+            return;
+        }
+        sendCommand({"CLUSTER", "MEET", target});
+    });
+    connect(forget_btn, &QPushButton::clicked, this, [this, target_node_edit]() {
+        QString target = target_node_edit->text().trimmed();
+        if (target.isEmpty()) {
+            appendLog("ERR CLUSTER FORGET 需要填写目标节点");
+            return;
+        }
+        sendCommand({"CLUSTER", "FORGET", target});
+    });
+    connect(failover_btn, &QPushButton::clicked, this, [this]() {
+        sendCommand({"CLUSTER", "FAILOVER", "TAKEOVER"});
     });
 
     return page;
@@ -1694,8 +2018,11 @@ QWidget* MonitorWindow::buildDiagnosticsTab() {
     QPushButton* info_persistence_btn = new QPushButton("INFO 持久化", resp_box);
     QPushButton* info_replication_btn = new QPushButton("INFO 复制", resp_box);
     QPushButton* info_cluster_btn = new QPushButton("INFO 集群", resp_box);
+    QLineEdit* acl_user_edit = new QLineEdit("default", resp_box);
+    acl_user_edit->setPlaceholderText("ACL 用户名");
     QPushButton* acl_whoami_btn = new QPushButton("ACL WHOAMI", resp_box);
     QPushButton* acl_list_btn = new QPushButton("ACL LIST", resp_box);
+    QPushButton* acl_getuser_btn = new QPushButton("ACL GETUSER", resp_box);
     QPushButton* slowlog_len_btn = new QPushButton("SLOWLOG LEN", resp_box);
     QPushButton* slowlog_get_btn = new QPushButton("SLOWLOG GET", resp_box);
     QPushButton* command_count_btn = new QPushButton("COMMAND COUNT", resp_box);
@@ -1713,11 +2040,13 @@ QWidget* MonitorWindow::buildDiagnosticsTab() {
     resp->addWidget(info_cluster_btn, 1, 3);
     resp->addWidget(acl_whoami_btn, 2, 0);
     resp->addWidget(acl_list_btn, 2, 1);
-    resp->addWidget(slowlog_len_btn, 2, 2);
-    resp->addWidget(slowlog_get_btn, 2, 3);
-    resp->addWidget(command_count_btn, 3, 0);
-    resp->addWidget(command_btn, 3, 1);
-    resp->addWidget(clear_btn, 3, 3);
+    resp->addWidget(acl_user_edit, 2, 2);
+    resp->addWidget(acl_getuser_btn, 2, 3);
+    resp->addWidget(slowlog_len_btn, 3, 0);
+    resp->addWidget(slowlog_get_btn, 3, 1);
+    resp->addWidget(command_count_btn, 4, 0);
+    resp->addWidget(command_btn, 4, 1);
+    resp->addWidget(clear_btn, 4, 3);
 
     QGroupBox* output_box = new QGroupBox("诊断输出", page);
     QVBoxLayout* output_layout = new QVBoxLayout(output_box);
@@ -1741,7 +2070,7 @@ QWidget* MonitorWindow::buildDiagnosticsTab() {
     connect(metrics_btn, &QPushButton::clicked, this, [this]() {
         diagnostics_output_->appendPlainText("> GET /metrics");
         stats_client_.fetchMetrics(host(), statsPort());
-        pages_->setCurrentIndex(6);
+        openToolDialog(6, "Prometheus 指标");
     });
 
     connect(info_all_btn, &QPushButton::clicked, this, [this]() { sendCommand({"INFO"}); });
@@ -1754,6 +2083,14 @@ QWidget* MonitorWindow::buildDiagnosticsTab() {
     connect(info_cluster_btn, &QPushButton::clicked, this, [this]() { sendCommand({"INFO", "cluster"}); });
     connect(acl_whoami_btn, &QPushButton::clicked, this, [this]() { sendCommand({"ACL", "WHOAMI"}); });
     connect(acl_list_btn, &QPushButton::clicked, this, [this]() { sendCommand({"ACL", "LIST"}); });
+    connect(acl_getuser_btn, &QPushButton::clicked, this, [this, acl_user_edit]() {
+        QString username = acl_user_edit->text().trimmed();
+        if (username.isEmpty()) {
+            appendLog("ERR ACL GETUSER 需要填写用户名");
+            return;
+        }
+        sendCommand({"ACL", "GETUSER", username});
+    });
     connect(slowlog_len_btn, &QPushButton::clicked, this, [this]() { sendCommand({"SLOWLOG", "LEN"}); });
     connect(slowlog_get_btn, &QPushButton::clicked, this, [this]() { sendCommand({"SLOWLOG", "GET", "10"}); });
     connect(command_count_btn, &QPushButton::clicked, this, [this]() { sendCommand({"COMMAND", "COUNT"}); });
@@ -1853,6 +2190,13 @@ void MonitorWindow::startServer() {
     }
     if (!replicas_edit_->text().trimmed().isEmpty()) {
         args << "--replicas" << replicas_edit_->text().trimmed();
+    }
+    if (!acl_users_edit_->text().trimmed().isEmpty()) {
+        const QStringList specs = acl_users_edit_->text().split(';', Qt::SkipEmptyParts);
+        for (QString spec : specs) {
+            spec = spec.trimmed();
+            if (!spec.isEmpty()) args << "--acl-user" << spec;
+        }
     }
     if (aof_check_->isChecked()) {
         args << "--appendonly-file"
@@ -2267,6 +2611,43 @@ void MonitorWindow::stopBenchmark() {
     }
 }
 
+void MonitorWindow::runScriptTool(const QString& script, const QStringList& args) {
+    if (script_process_->state() != QProcess::NotRunning) {
+        appendDemoLog("脚本任务已经在运行");
+        return;
+    }
+    if (!QFileInfo::exists(script)) {
+        appendDemoLog("ERR 未找到脚本：" + script);
+        return;
+    }
+
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    env.insert("SERVER", server_path_edit_->text().trimmed().isEmpty()
+                             ? "build/miniredis"
+                             : server_path_edit_->text().trimmed());
+    env.insert("HOST", "127.0.0.1");
+    env.insert("PASSWORD", password_edit_->text().isEmpty() ? "secret" : password_edit_->text());
+
+    QStringList process_args{script};
+    process_args << args;
+    appendDemoLog("> bash " + process_args.join(' '));
+    script_process_->setProcessEnvironment(env);
+    script_process_->setWorkingDirectory(QDir::currentPath());
+    script_process_->start("bash", process_args);
+}
+
+void MonitorWindow::stopScriptTool() {
+    if (script_process_->state() == QProcess::NotRunning) {
+        return;
+    }
+    appendDemoLog("正在停止脚本任务...");
+    script_process_->terminate();
+    if (!script_process_->waitForFinished(3000)) {
+        appendDemoLog("脚本任务未正常停止，正在强制结束");
+        script_process_->kill();
+    }
+}
+
 void MonitorWindow::sendCommand(const QStringList& parts) {
     if (parts.isEmpty()) return;
     QString rendered = "> " + parts.join(' ');
@@ -2280,7 +2661,7 @@ void MonitorWindow::sendCommand(const QStringList& parts) {
 void MonitorWindow::executeConsoleScript() {
     if (!console_editor_) return;
     QTextCursor cursor = console_editor_->textCursor();
-    QString script = cursor.hasSelection() ? cursor.selectedText() : console_editor_->toPlainText();
+    QString script = cursor.hasSelection() ? cursor.selectedText() : cursor.block().text();
     script.replace(QChar::ParagraphSeparator, '\n');
     script.replace(QChar::LineSeparator, '\n');
     script = script.trimmed();
@@ -2552,8 +2933,8 @@ void MonitorWindow::appendLog(const QString& text) {
 
     if (console_output_) console_output_->appendPlainText(line);
     if (demo_output_) demo_output_->appendPlainText(line);
-    if (cluster_output_ && pages_->currentIndex() == 3) cluster_output_->appendPlainText(line);
-    if (diagnostics_output_ && pages_->currentIndex() == 5) diagnostics_output_->appendPlainText(line);
+    if (cluster_output_ && cluster_output_->isVisible()) cluster_output_->appendPlainText(line);
+    if (diagnostics_output_ && diagnostics_output_->isVisible()) diagnostics_output_->appendPlainText(line);
     if (!maybeFollowMoved(line) && !line.startsWith(">") && !line.startsWith("正在跟随 MOVED")) {
         moved_follow_hops_ = 0;
     }

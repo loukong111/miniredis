@@ -9,7 +9,9 @@
 #include <QProcess>
 #include <QString>
 #include <QStringList>
+#include <QVector>
 
+class QAction;
 class QCheckBox;
 class QComboBox;
 class QLabel;
@@ -30,6 +32,9 @@ public:
 
 private:
     void initConnectionControls(QWidget* parent);
+    void buildMenus();
+    void openToolDialog(int index, const QString& title);
+    void switchPage(int index);
     void showConnectionDialog();
     QWidget* buildConsoleTab();
     QWidget* buildDemoLabTab();
@@ -51,6 +56,8 @@ private:
     void runBenchmark();
     void runBenchmarkMatrix();
     void stopBenchmark();
+    void runScriptTool(const QString& script, const QStringList& args = {});
+    void stopScriptTool();
     void sendCommand(const QStringList& parts);
     void executeConsoleScript();
     void insertConsoleTemplate(const QString& text);
@@ -75,11 +82,13 @@ private:
     QTimer* stats_timer_;
     QProcess* server_process_;
     QProcess* benchmark_process_;
+    QProcess* script_process_;
     QMap<int, QProcess*> cluster_processes_;
 
     QLineEdit* host_edit_;
     QSpinBox* resp_port_spin_;
     QSpinBox* stats_port_spin_;
+    QLineEdit* auth_user_edit_;
     QLineEdit* password_edit_;
     QCheckBox* follow_moved_check_;
     QLabel* status_label_;
@@ -98,6 +107,9 @@ private:
     QPlainTextEdit* benchmark_output_;
     QMap<QString, QLabel*> stat_labels_;
     QMap<QString, QLabel*> console_stat_labels_;
+    QVector<QAction*> page_actions_;
+    QWidget* resource_panel_;
+    QWidget* inspector_panel_;
 
     QLineEdit* server_path_edit_;
     QLineEdit* bind_edit_;
@@ -106,6 +118,7 @@ private:
     QLineEdit* cluster_config_file_edit_;
     QLineEdit* replicaof_edit_;
     QLineEdit* replicas_edit_;
+    QLineEdit* acl_users_edit_;
     QLineEdit* node_addr_edit_;
     QLineEdit* nodes_edit_;
     QSpinBox* server_resp_port_spin_;

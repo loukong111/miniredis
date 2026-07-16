@@ -13,7 +13,7 @@ MiniRedis 是一个面向本地和内网后台服务的轻量级 KV 缓存中间
 - 提供 `/healthz`、`/readyz`、`/stats` 和 Prometheus `/metrics`，暴露连接、延迟、资源限制、snapshot、AOF rewrite 等指标。
 - 支持 AUTH、轻量 ACL 用户、命令权限、key 前缀权限、安全默认 bind、连接数限制、请求大小限制、优雅停机、Docker 和 systemd 部署示例。
 - 提供简化 replication、轻量 replication backlog/PSYNC 增量同步、experimental Redis Cluster 风格 slot 路由、`MOVED/ASK`、slot 迁移和手动 failover takeover。
-- 提供 Qt Console，可视化演示命令编辑、Demo Lab、服务启停、Replication、Cluster、Diagnostics、Observability、Metrics 和 Benchmark。
+- 提供 Qt Console，可视化演示资源管理器、命令工作区、服务启停、Replication、Cluster、诊断监控和压测。
 
 ## 平台定位
 
@@ -67,15 +67,15 @@ docker compose up --build
 
 ## Qt Console
 
-Qt Console 是项目的可视化演示入口，尽量减少对终端命令的依赖：
+Qt Console 是项目的可视化演示入口，采用类似数据库客户端的工作台布局，尽量减少对终端命令的依赖：
 
-- Console：提供资源树、多行命令编辑器、命令模板、历史记录、执行输出、错误提示、运行摘要和命令参考。
-- Demo Lab：一键演示 Replication/PSYNC、AOF Recovery 和 Cluster 故障观察流程，尽量减少终端依赖。
-- Server：启动单节点、master/replica、三节点 cluster，配置 AOF、maxmemory、IO threads、cache shards 等参数。
-- Cluster Routing：查询 `CLUSTER INFO/NODES/SLOTS/SLOTMAP`，演示 `MEET/FORGET`、`MOVED/ASK`、slot 迁移和节点故障。
-- Observability：展示 `/stats` 中的命令数、命中率、连接数、内存、慢日志、资源限制、snapshot 和 AOF rewrite 状态。
-- Diagnostics：触发 `/healthz`、`/readyz`、`INFO`、`ACL`、`SLOWLOG` 等排障入口。
-- Benchmark：调用 `redis-benchmark` 和 `scripts/benchmark.sh` 输出 QPS 与延迟数据。
+- 顶部菜单和工具栏：提供连接、运行、服务、集群、监控、工具等入口，主界面保持命令工作区优先，低频能力通过弹窗打开。
+- 资源管理器：左侧展示当前 MiniRedis 连接、KV 命令、观测诊断、集群和 ACL 常用命令，支持双击插入模板。
+- 命令工作区：中间提供多行命令编辑器、命令模板、历史记录、选中/当前行执行、全部执行和统一输出面板。
+- 服务与集群：可视化启动单节点、master/replica、三节点 cluster，配置 AOF、ACL 用户、maxmemory、IO threads、cache shards，并演示 `MEET/FORGET`、`MOVED/ASK`、slot 迁移、节点故障和手动 takeover。
+- 监控诊断：展示 `/stats`、Prometheus `/metrics`、`/healthz`、`/readyz`、`INFO`、`ACL WHOAMI/LIST/GETUSER`、`SLOWLOG` 等运行和排障信息。
+- 自动验证：可从 Qt 端触发 smoke、recovery/soak、replica、cluster 脚本，并在演示日志中查看输出。
+- 压测：调用 `redis-benchmark` 和 `scripts/benchmark.sh` 输出 QPS 与延迟数据。
 
 构建运行：
 
