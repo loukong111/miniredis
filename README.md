@@ -12,7 +12,7 @@ MiniRedis 是一个面向本地和内网后台服务的轻量级 KV 缓存中间
 - 支持 TTL-aware 二进制 snapshot、AOF 增量日志、AOF rewrite、坏尾恢复、rewrite 失败重试和损坏 snapshot 回退。
 - 提供 `/healthz`、`/readyz`、`/stats` 和 Prometheus `/metrics`，暴露连接、延迟、资源限制、snapshot、AOF rewrite 等指标。
 - 支持 AUTH、轻量 ACL 用户、命令权限、key 前缀权限、安全默认 bind、连接数限制、请求大小限制、优雅停机、Docker 和 systemd 部署示例。
-- 提供长连接异步 replication、ACK/offset、backlog 增量追平和只读 replica，并支持 experimental Cluster slot 路由、`MOVED/ASK`、slot 迁移与手动 takeover。
+- 提供长连接异步 replication、生命周期 replication ID、ACK/offset 身份校验、backlog 增量追平和只读 replica，并支持 experimental Cluster slot 路由、`MOVED/ASK`、slot 迁移与手动 takeover。
 - 提供 Qt Console，可视化演示资源管理器、命令工作区、服务启停、Replication、Cluster、诊断监控和压测。
 
 ## 平台定位
@@ -157,5 +157,5 @@ scripts/recovery_soak.sh
 - ACL 支持用户启停、角色、命令白名单/黑名单和 key 前缀限制，但不兼容完整 Redis ACL 语法。
 - 没有 TLS，公网部署需要网关、内网隔离或安全组限制。
 - 原生服务端目标平台是 Linux；Windows/macOS 推荐通过 Docker 或远程 Linux 服务端配合 Qt Console 使用。
-- Replication 支持全量同步、长连接异步转发、ACK/offset 连续性校验、backlog 断线追平和手动 takeover；暂不提供完整 Redis PSYNC2、backlog 持久化和自动选主。
+- Replication 支持全量同步、长连接异步转发、replication ID + offset 连续性校验、backlog 断线追平和手动 takeover；暂不提供 Redis PSYNC2 双 ID 历史、backlog 持久化和自动选主。
 - Cluster 模式面向手动运维和演示场景，支持拓扑维护、slot 迁移和手动 takeover，不提供完整 Redis Cluster gossip、投票和一致性协议。
