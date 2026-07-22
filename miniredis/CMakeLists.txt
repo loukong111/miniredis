@@ -95,6 +95,7 @@ set(MINIREDIS_LIB_SOURCES
     ${CMAKE_SOURCE_DIR}/src/persistence/file_persistence.cpp
     ${CMAKE_SOURCE_DIR}/src/server/config.cpp
     ${CMAKE_SOURCE_DIR}/src/server/command_handler.cpp
+    ${CMAKE_SOURCE_DIR}/src/server/replication_dispatcher.cpp
     ${CMAKE_SOURCE_DIR}/src/server/server.cpp
 )
 
@@ -141,8 +142,12 @@ if(MINIREDIS_BUILD_TESTS)
         ${CMAKE_SOURCE_DIR}/src/metrics/stats.cpp
         ${CMAKE_SOURCE_DIR}/src/server/config.cpp
         ${CMAKE_SOURCE_DIR}/src/server/command_handler.cpp
+        ${CMAKE_SOURCE_DIR}/src/server/replication_dispatcher.cpp
     )
     target_link_libraries(miniredis_unit_tests Threads::Threads)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(miniredis_unit_tests PRIVATE -UNDEBUG)
+    endif()
     miniredis_apply_sanitizers(miniredis_unit_tests)
     add_test(NAME miniredis_unit_tests COMMAND miniredis_unit_tests)
 endif()

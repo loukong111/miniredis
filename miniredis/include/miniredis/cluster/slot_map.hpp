@@ -75,6 +75,8 @@ public:
     size_t SuspectNodeCount() const;
 
 private:
+    bool LoadSnapshotInternal(const ClusterSlotMapSnapshot& snapshot, bool only_if_newer);
+
     std::array<std::string, kRedisClusterSlots> slot_owner_;
     std::array<ClusterSlotMeta, kRedisClusterSlots> slot_meta_;
     std::vector<std::string> nodes_;

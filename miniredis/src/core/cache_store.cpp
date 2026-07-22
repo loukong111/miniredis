@@ -44,23 +44,21 @@ int ttlSecondsForAof(const CacheEntry& entry) {
 } // namespace
 
 bool CacheEntry::setValue(const std::string& value, FixedMemoryPool& pool) {
-    // 释放原有内存
-    release(pool);
-    
-    size = value.size();
-    // 判断是否使用内存池（<= BLOCK_SIZE）
-    if (size <= FixedMemoryPool::BLOCK_SIZE) {
-        data = static_cast<char*>(pool.allocate());
-        if (!data) return false;
-        is_pool_allocated = true;
-        std::memcpy(data, value.data(), size);
+    char* replacement = nullptr;
+    const size_t replacement_size = value.size();
+    const bool replacement_from_pool = replacement_size <= FixedMemoryPool::BLOCK_SIZE;
+    if (replacement_from_pool) {
+        replacement = static_cast<char*>(pool.allocate());
     } else {
-        // 大值：直接 new 字节数组
-        data = new (std::nothrow) char[size];
-        if (!data) return false;
-        is_pool_allocated = false;
-        std::memcpy(data, value.data(), size);
+        replacement = new (std::nothrow) char[replacement_size];
     }
+    if (!replacement) return false;
+
+    std::memcpy(replacement, value.data(), replacement_size);
+    release(pool);
+    data = replacement;
+    size = replacement_size;
+    is_pool_allocated = replacement_from_pool;
     return true;
 }
 
@@ -186,15 +184,21 @@ SetResult CacheStore::set(const std::string& key, const std::string& value, int 
         }
     }
 
-    auto& entry = shard.store[key];
-    if (old_memory > 0) {
-        shard.used_memory_bytes -= old_memory;
-    }
-    if (!entry.setValue(value, pool_)) {
-        shard.store.erase(key);
+    bool inserted = false;
+    try {
+        auto result = shard.store.try_emplace(key);
+        it = result.first;
+        inserted = result.second;
+    } catch (const std::bad_alloc&) {
         return SetResult::AllocationFailed;
     }
-    shard.used_memory_bytes += key.size() + entry.size;
+    if (!it->second.setValue(value, pool_)) {
+        if (inserted) shard.store.erase(it);
+        return SetResult::AllocationFailed;
+    }
+    if (old_memory > 0) shard.used_memory_bytes -= old_memory;
+    shard.used_memory_bytes += key.size() + it->second.size;
+    auto& entry = it->second;
     entry.last_access_time = std::chrono::steady_clock::now();
     if (ttl_seconds > 0) {
         entry.expire_time = std::chrono::steady_clock::now() + std::chrono::seconds(ttl_seconds);
@@ -225,9 +229,15 @@ ValueUpdateResult CacheStore::set_if_absent(const std::string& key, const std::s
         }
     }
 
-    auto& entry = shard.store[key];
+    std::unordered_map<std::string, CacheEntry>::iterator entry_it;
+    try {
+        entry_it = shard.store.try_emplace(key).first;
+    } catch (const std::bad_alloc&) {
+        return ValueUpdateResult{SetResult::AllocationFailed, false, {}, 0, 0};
+    }
+    auto& entry = entry_it->second;
     if (!entry.setValue(value, pool_)) {
-        shard.store.erase(key);
+        shard.store.erase(entry_it);
         return ValueUpdateResult{SetResult::AllocationFailed, false, {}, 0, 0};
     }
     shard.used_memory_bytes += key.size() + entry.size;
@@ -266,15 +276,21 @@ ValueUpdateResult CacheStore::append(const std::string& key, const std::string& 
         it = shard.store.find(key);
     }
 
-    auto& entry = shard.store[key];
-    if (old_memory > 0) {
-        shard.used_memory_bytes -= old_memory;
-    }
-    if (!entry.setValue(new_value, pool_)) {
-        shard.store.erase(key);
+    bool inserted = false;
+    try {
+        auto result = shard.store.try_emplace(key);
+        it = result.first;
+        inserted = result.second;
+    } catch (const std::bad_alloc&) {
         return ValueUpdateResult{SetResult::AllocationFailed, false, {}, 0, 0};
     }
-    shard.used_memory_bytes += key.size() + entry.size;
+    if (!it->second.setValue(new_value, pool_)) {
+        if (inserted) shard.store.erase(it);
+        return ValueUpdateResult{SetResult::AllocationFailed, false, {}, 0, 0};
+    }
+    if (old_memory > 0) shard.used_memory_bytes -= old_memory;
+    shard.used_memory_bytes += key.size() + it->second.size;
+    auto& entry = it->second;
     entry.expire_time = expire_time;
     entry.last_access_time = std::chrono::steady_clock::now();
     return ValueUpdateResult{SetResult::Ok, true, new_value, entry.size, ttlSecondsForAof(entry)};
@@ -315,15 +331,21 @@ IncrementResult CacheStore::increment(const std::string& key, long long delta) {
         }
     }
 
-    auto& entry = shard.store[key];
-    if (old_memory > 0) {
-        shard.used_memory_bytes -= old_memory;
-    }
-    if (!entry.setValue(new_value, pool_)) {
-        shard.store.erase(key);
+    bool inserted = false;
+    try {
+        auto result = shard.store.try_emplace(key);
+        it = result.first;
+        inserted = result.second;
+    } catch (const std::bad_alloc&) {
         return IncrementResult{IncrementResultCode::AllocationFailed, 0, {}, 0};
     }
-    shard.used_memory_bytes += key.size() + entry.size;
+    if (!it->second.setValue(new_value, pool_)) {
+        if (inserted) shard.store.erase(it);
+        return IncrementResult{IncrementResultCode::AllocationFailed, 0, {}, 0};
+    }
+    if (old_memory > 0) shard.used_memory_bytes -= old_memory;
+    shard.used_memory_bytes += key.size() + it->second.size;
+    auto& entry = it->second;
     entry.expire_time = expire_time;
     entry.last_access_time = std::chrono::steady_clock::now();
     return IncrementResult{IncrementResultCode::Ok, next, new_value, ttlSecondsForAof(entry)};

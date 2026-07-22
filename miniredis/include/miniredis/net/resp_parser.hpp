@@ -18,9 +18,9 @@ enum class RespType {
 
 // 解析结果：包含类型和值
 struct RespValue {
-    RespType type;
+    RespType type = RespType::SIMPLE_STRING;
     std::string str;                // 用于简单字符串、错误、批量字符串
-    long long integer;              // 用于整数
+    long long integer = 0;          // 用于整数
     std::vector<RespValue> array;   // 用于数组
 };
 
@@ -35,18 +35,22 @@ public:
     // 重置解码器（清空缓冲区）
     void reset();
     size_t bufferedSize() const { return buffer_.size(); }
+    bool hasProtocolError() const { return protocol_error_; }
+    const std::string& protocolError() const { return protocol_error_message_; }
 
 private:
     std::string buffer_;
+    bool protocol_error_ = false;
+    std::string protocol_error_message_;
 
-    // 内部解析函数，从 pos_ 开始尝试解析一个值，返回解析后的长度（包括结尾的 \r\n）
-    // 如果解析失败（不完整或错误）返回 -1
-    static std::optional<RespValue> parseValue(const std::string& data, size_t& pos);
-    static std::optional<RespValue> parseSimpleString(const std::string& data, size_t& pos);
-    static std::optional<RespValue> parseError(const std::string& data, size_t& pos);
-    static std::optional<RespValue> parseInteger(const std::string& data, size_t& pos);
-    static std::optional<RespValue> parseBulkString(const std::string& data, size_t& pos);
-    static std::optional<RespValue> parseArray(const std::string& data, size_t& pos);
+    std::optional<size_t> findLineEnd(const std::string& data, size_t pos);
+    void setProtocolError(std::string message);
+    std::optional<RespValue> parseValue(const std::string& data, size_t& pos, size_t depth);
+    std::optional<RespValue> parseSimpleString(const std::string& data, size_t& pos);
+    std::optional<RespValue> parseError(const std::string& data, size_t& pos);
+    std::optional<RespValue> parseInteger(const std::string& data, size_t& pos);
+    std::optional<RespValue> parseBulkString(const std::string& data, size_t& pos);
+    std::optional<RespValue> parseArray(const std::string& data, size_t& pos, size_t depth);
 };
 
 // RESP 编码器（将响应写入 string）

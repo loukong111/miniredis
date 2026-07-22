@@ -49,6 +49,33 @@ wait_for_server() {
   return 1
 }
 
+wait_for_value() {
+  local port="$1"
+  local key="$2"
+  local expected="$3"
+  for _ in $(seq 1 100); do
+    if [[ "$("${REDIS_CLI}" -p "${port}" --raw GET "${key}" 2>/dev/null || true)" == "${expected}" ]]; then
+      return 0
+    fi
+    sleep 0.05
+  done
+  echo "key ${key} on port ${port} did not become ${expected}" >&2
+  return 1
+}
+
+wait_for_missing_key() {
+  local port="$1"
+  local key="$2"
+  for _ in $(seq 1 100); do
+    if [[ "$("${REDIS_CLI}" -p "${port}" --raw EXISTS "${key}" 2>/dev/null || true)" == "0" ]]; then
+      return 0
+    fi
+    sleep 0.05
+  done
+  echo "key ${key} on port ${port} was not deleted" >&2
+  return 1
+}
+
 start_master() {
   local master_pid
   master_pid="$(pid_file_for master)"
@@ -86,6 +113,18 @@ start_replica() {
 start_pair() {
   start_master
   start_replica
+}
+
+stop_replica() {
+  local pid_file
+  pid_file="$(pid_file_for replica)"
+  if is_running "${pid_file}"; then
+    local pid
+    pid="$(cat "${pid_file}")"
+    kill -INT "${pid}" 2>/dev/null || true
+    wait "${pid}" 2>/dev/null || true
+  fi
+  rm -f "${pid_file}"
 }
 
 stop_pair() {
@@ -128,23 +167,43 @@ smoke_pair() {
   "${REDIS_CLI}" -p "${REPLICA_PORT}" --raw INFO replication | grep -q 'role:slave'
   "${REDIS_CLI}" -p "${REPLICA_PORT}" --raw GET repl:bootstrap | grep -q '^before-replica$'
   "${REDIS_CLI}" -p "${MASTER_PORT}" --raw SET repl:demo one | grep -q '^OK$'
-  sleep 0.3
-  "${REDIS_CLI}" -p "${REPLICA_PORT}" --raw GET repl:demo | grep -q '^one$'
+  wait_for_value "${REPLICA_PORT}" repl:demo one
   "${REDIS_CLI}" -p "${REPLICA_PORT}" --raw SET repl:demo blocked | grep -q '^ERR READONLY'
   "${REDIS_CLI}" -p "${MASTER_PORT}" --raw EXPIRE repl:demo 30 | grep -q '^1$'
-  sleep 0.3
   local ttl
-  ttl="$("${REDIS_CLI}" -p "${REPLICA_PORT}" --raw TTL repl:demo)"
+  for _ in $(seq 1 100); do
+    ttl="$("${REDIS_CLI}" -p "${REPLICA_PORT}" --raw TTL repl:demo 2>/dev/null || true)"
+    if [[ "${ttl}" =~ ^[0-9]+$ ]] && [[ "${ttl}" -ge 1 ]] && [[ "${ttl}" -le 30 ]]; then
+      break
+    fi
+    sleep 0.05
+  done
   if [[ "${ttl}" -lt 1 || "${ttl}" -gt 30 ]]; then
     echo "replica ttl out of range: ${ttl}" >&2
     stop_pair
     exit 1
   fi
   "${REDIS_CLI}" -p "${MASTER_PORT}" --raw DEL repl:demo | grep -q '^1$'
-  sleep 0.3
-  "${REDIS_CLI}" -p "${REPLICA_PORT}" --raw EXISTS repl:demo | grep -q '^0$'
+  wait_for_missing_key "${REPLICA_PORT}" repl:demo
 
-  echo "replica demo smoke passed"
+  stop_replica
+  local start_ns elapsed_ms
+  start_ns="$(date +%s%N)"
+  "${REDIS_CLI}" -p "${MASTER_PORT}" --raw SET repl:offline catch-up | grep -q '^OK$'
+  elapsed_ms=$(( ($(date +%s%N) - start_ns) / 1000000 ))
+  if [[ "${elapsed_ms}" -gt 1000 ]]; then
+    echo "master write waited ${elapsed_ms}ms for an offline replica" >&2
+    stop_pair
+    exit 1
+  fi
+  start_replica
+  wait_for_server "${REPLICA_PORT}"
+  wait_for_value "${REPLICA_PORT}" repl:offline catch-up
+
+  "${REDIS_CLI}" -p "${MASTER_PORT}" --raw INFO replication | grep -q 'repl_backlog_histlen:'
+  "${REDIS_CLI}" -p "${MASTER_PORT}" --raw INFO replication | grep -q 'offset='
+
+  echo "replica demo smoke passed (offline write ${elapsed_ms}ms, reconnect catch-up verified)"
   stop_pair
 }
 

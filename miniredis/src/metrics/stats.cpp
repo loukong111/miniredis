@@ -208,6 +208,20 @@ void Stats::setAofRewriteStatus(const std::string& status, const std::string& er
     aof_rewrite_last_error_ = error;
 }
 
+void Stats::setReplicationState(size_t configured_replicas, size_t connected_replicas,
+                                uint64_t master_offset, uint64_t minimum_ack_offset,
+                                uint64_t pending_offsets, uint64_t reconnects,
+                                uint64_t errors, uint64_t backlog_misses) {
+    replication_configured_replicas_.store(configured_replicas, std::memory_order_relaxed);
+    replication_connected_replicas_.store(connected_replicas, std::memory_order_relaxed);
+    replication_master_offset_.store(master_offset, std::memory_order_relaxed);
+    replication_min_ack_offset_.store(minimum_ack_offset, std::memory_order_relaxed);
+    replication_pending_offsets_.store(pending_offsets, std::memory_order_relaxed);
+    replication_reconnects_.store(reconnects, std::memory_order_relaxed);
+    replication_errors_.store(errors, std::memory_order_relaxed);
+    replication_backlog_misses_.store(backlog_misses, std::memory_order_relaxed);
+}
+
 void Stats::setNodeAddr(const std::string& addr) {
     std::lock_guard<std::mutex> lock(node_mutex_);
     node_addr_ = addr;
@@ -271,11 +285,28 @@ StatsSnapshot Stats::snapshot() const {
         snap.aof_rewrite_last_status = aof_rewrite_last_status_;
         snap.aof_rewrite_last_error = aof_rewrite_last_error_;
     }
+    snap.replication_configured_replicas =
+        replication_configured_replicas_.load(std::memory_order_relaxed);
+    snap.replication_connected_replicas =
+        replication_connected_replicas_.load(std::memory_order_relaxed);
+    snap.replication_master_offset =
+        replication_master_offset_.load(std::memory_order_relaxed);
+    snap.replication_min_ack_offset =
+        replication_min_ack_offset_.load(std::memory_order_relaxed);
+    snap.replication_pending_offsets =
+        replication_pending_offsets_.load(std::memory_order_relaxed);
+    snap.replication_reconnects = replication_reconnects_.load(std::memory_order_relaxed);
+    snap.replication_errors = replication_errors_.load(std::memory_order_relaxed);
+    snap.replication_backlog_misses =
+        replication_backlog_misses_.load(std::memory_order_relaxed);
     snap.ready = ready_.load(std::memory_order_relaxed);
     snap.io_threads = io_threads_.load(std::memory_order_relaxed);
 
     size_t total_gets = snap.get_hits + snap.get_misses;
-    snap.hit_rate = total_gets == 0 ? 0.0 : static_cast<double>(snap.get_hits) / total_gets;
+    snap.hit_rate = total_gets == 0
+                        ? 0.0
+                        : static_cast<double>(snap.get_hits) /
+                              static_cast<double>(total_gets);
     if (snap.latency_samples > 0) {
         snap.avg_command_latency_us =
             total_command_latency_us_.load(std::memory_order_relaxed) / snap.latency_samples;
@@ -333,6 +364,14 @@ std::string Stats::toJson() const {
     oss << "\"aof_rewrite_failures\":" << snap.aof_rewrite_failures << ",";
     oss << "\"aof_rewrite_last_status\":\"" << jsonEscape(snap.aof_rewrite_last_status) << "\",";
     oss << "\"aof_rewrite_last_error\":\"" << jsonEscape(snap.aof_rewrite_last_error) << "\",";
+    oss << "\"replication_configured_replicas\":" << snap.replication_configured_replicas << ",";
+    oss << "\"replication_connected_replicas\":" << snap.replication_connected_replicas << ",";
+    oss << "\"replication_master_offset\":" << snap.replication_master_offset << ",";
+    oss << "\"replication_min_ack_offset\":" << snap.replication_min_ack_offset << ",";
+    oss << "\"replication_pending_offsets\":" << snap.replication_pending_offsets << ",";
+    oss << "\"replication_reconnects\":" << snap.replication_reconnects << ",";
+    oss << "\"replication_errors\":" << snap.replication_errors << ",";
+    oss << "\"replication_backlog_misses\":" << snap.replication_backlog_misses << ",";
     oss << "\"ready\":" << (snap.ready ? "true" : "false") << ",";
     oss << "\"io_threads\":" << snap.io_threads;
     oss << "}";
@@ -425,6 +464,25 @@ std::string Stats::toPrometheus() const {
     oss << "# TYPE miniredis_aof_rewrite_last_status_info gauge\n";
     oss << "miniredis_aof_rewrite_last_status_info{status=\""
         << jsonEscape(snap.aof_rewrite_last_status) << "\"} 1\n";
+    oss << "# TYPE miniredis_replication_configured_replicas gauge\n";
+    oss << "miniredis_replication_configured_replicas "
+        << snap.replication_configured_replicas << "\n";
+    oss << "# TYPE miniredis_replication_connected_replicas gauge\n";
+    oss << "miniredis_replication_connected_replicas "
+        << snap.replication_connected_replicas << "\n";
+    oss << "# TYPE miniredis_replication_master_offset gauge\n";
+    oss << "miniredis_replication_master_offset " << snap.replication_master_offset << "\n";
+    oss << "# TYPE miniredis_replication_min_ack_offset gauge\n";
+    oss << "miniredis_replication_min_ack_offset " << snap.replication_min_ack_offset << "\n";
+    oss << "# TYPE miniredis_replication_pending_offsets gauge\n";
+    oss << "miniredis_replication_pending_offsets " << snap.replication_pending_offsets << "\n";
+    oss << "# TYPE miniredis_replication_reconnects counter\n";
+    oss << "miniredis_replication_reconnects " << snap.replication_reconnects << "\n";
+    oss << "# TYPE miniredis_replication_errors counter\n";
+    oss << "miniredis_replication_errors " << snap.replication_errors << "\n";
+    oss << "# TYPE miniredis_replication_backlog_misses counter\n";
+    oss << "miniredis_replication_backlog_misses "
+        << snap.replication_backlog_misses << "\n";
     oss << "# TYPE miniredis_ready gauge\n";
     oss << "miniredis_ready " << (snap.ready ? 1 : 0) << "\n";
     oss << "# TYPE miniredis_io_threads gauge\n";

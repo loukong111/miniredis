@@ -38,6 +38,9 @@ struct AppConfig {
     std::string appendfsync = "everysec";
     std::string replicaof;
     std::string replicas_str;
+    size_t replication_backlog_size = 10000;
+    size_t replication_sync_interval_ms = 1000;
+    size_t replication_reconnect_delay_ms = 500;
     std::string requirepass;
     std::vector<AclUser> acl_users;
     size_t max_request_bytes = 16 * 1024 * 1024;

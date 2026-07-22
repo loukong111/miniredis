@@ -4,8 +4,8 @@ services:
       context: .
     image: miniredis:latest
     ports:
-      - "6366:6366"
-      - "8080:8080"
+      - "127.0.0.1:6366:6366"
+      - "127.0.0.1:8080:8080"
     environment:
       MINIREDIS_REQUIREPASS: ${MINIREDIS_REQUIREPASS:-change-me}
       MINIREDIS_MAX_CLIENTS: "10000"

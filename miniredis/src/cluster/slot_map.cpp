@@ -89,6 +89,15 @@ void ClusterSlotMap::Rebuild(const std::vector<std::string>& nodes) {
 }
 
 bool ClusterSlotMap::LoadSnapshot(const ClusterSlotMapSnapshot& snapshot) {
+    return LoadSnapshotInternal(snapshot, false);
+}
+
+bool ClusterSlotMap::LoadSnapshotIfNewer(const ClusterSlotMapSnapshot& snapshot) {
+    return LoadSnapshotInternal(snapshot, true);
+}
+
+bool ClusterSlotMap::LoadSnapshotInternal(const ClusterSlotMapSnapshot& snapshot,
+                                          bool only_if_newer) {
     if (snapshot.slot_owner.size() != kRedisClusterSlots) return false;
     if (!snapshot.slot_meta.empty() && snapshot.slot_meta.size() != kRedisClusterSlots) return false;
 
@@ -117,6 +126,7 @@ bool ClusterSlotMap::LoadSnapshot(const ClusterSlotMapSnapshot& snapshot) {
     }
 
     std::lock_guard<std::mutex> lock(mutex_);
+    if (only_if_newer && snapshot.epoch <= epoch_) return false;
     nodes_ = std::move(nodes);
     std::copy(snapshot.slot_owner.begin(), snapshot.slot_owner.end(), slot_owner_.begin());
     slot_meta_.fill(ClusterSlotMeta{});
@@ -132,14 +142,6 @@ bool ClusterSlotMap::LoadSnapshot(const ClusterSlotMapSnapshot& snapshot) {
     }
     epoch_ = snapshot.epoch;
     return true;
-}
-
-bool ClusterSlotMap::LoadSnapshotIfNewer(const ClusterSlotMapSnapshot& snapshot) {
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (snapshot.epoch <= epoch_) return false;
-    }
-    return LoadSnapshot(snapshot);
 }
 
 ClusterSlotMapSnapshot ClusterSlotMap::ExportSnapshot() const {

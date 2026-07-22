@@ -8,6 +8,7 @@
 #include "miniredis/persistence/append_only_file.hpp"
 #include "miniredis/server/config.hpp"
 #include "miniredis/server/replication_backlog.hpp"
+#include "miniredis/server/replication_dispatcher.hpp"
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -36,6 +37,7 @@ private:
     int bindListen() const;
     void startStatsServer();
     void startClusterDiscovery();
+    void startReplicationSync();
     bool syncFromMaster();
     bool tryPartialSyncFromMaster(const std::string& host, int port, uint64_t last_offset);
     bool fullSyncFromMaster(const std::string& host, int port);
@@ -62,16 +64,21 @@ private:
     std::unique_ptr<AppendOnlyFile> aof_;
     ReplicationBacklog replication_backlog_;
     std::atomic<uint64_t> replication_offset_;
+    std::unique_ptr<ReplicationDispatcher> replication_dispatcher_;
+    std::mutex replication_apply_mutex_;
+    std::atomic<bool> replica_following_{false};
     std::unique_ptr<ClusterSlotMap> slot_map_;
 #ifdef HAVE_MYSQL
     std::unique_ptr<MySQLClient> mysql_;
 #endif
     std::mutex slot_map_mutex_;
+    mutable std::mutex cluster_config_save_mutex_;
 
     std::thread stats_thread_;
     std::thread accept_thread_;
     std::vector<std::thread> io_threads_;
     std::thread cluster_refresh_thread_;
+    std::thread replication_sync_thread_;
 };
 
 } // namespace miniredis

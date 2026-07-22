@@ -103,6 +103,33 @@ static void testRespParserHandlesPipelinedFrames() {
     assert(!decoder.parse().has_value());
 }
 
+static void testRespParserRejectsMalformedFrames() {
+    RespDecoder decoder;
+    decoder.feed(":12x\r\n");
+    assert(!decoder.parse().has_value());
+    assert(decoder.hasProtocolError());
+
+    decoder.reset();
+    decoder.feed("$3\r\nabcxx");
+    assert(!decoder.parse().has_value());
+    assert(decoder.hasProtocolError());
+
+    decoder.reset();
+    decoder.feed("$-2\r\n");
+    assert(!decoder.parse().has_value());
+    assert(decoder.hasProtocolError());
+
+    decoder.reset();
+    decoder.feed("?invalid\r\n");
+    assert(!decoder.parse().has_value());
+    assert(decoder.hasProtocolError());
+
+    decoder.reset();
+    decoder.feed("$3\r\nab");
+    assert(!decoder.parse().has_value());
+    assert(!decoder.hasProtocolError());
+}
+
 static void testMemoryPoolGrow() {
     FixedMemoryPool pool(1);
     void* first = pool.allocate();
@@ -129,6 +156,36 @@ static void testThreadPoolRejectsSubmitAfterStop() {
         rejected = true;
     }
     assert(rejected);
+}
+
+static void testThreadPoolDoesNotShrinkBelowMinimum() {
+    DynamicThreadPool pool(2, 4, 1, 1);
+    std::atomic<bool> release{false};
+    std::vector<std::future<void>> futures;
+    for (int i = 0; i < 12; ++i) {
+        futures.push_back(pool.submit([&release]() {
+            while (!release.load(std::memory_order_acquire)) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        }));
+    }
+
+    const auto expand_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(4);
+    while (pool.active_threads() < 4 && std::chrono::steady_clock::now() < expand_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    assert(pool.active_threads() == 4);
+
+    release.store(true, std::memory_order_release);
+    for (auto& future : futures) future.get();
+
+    const auto shrink_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (pool.active_threads() > 2 && std::chrono::steady_clock::now() < shrink_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    assert(pool.active_threads() == 2);
+    pool.stop();
+    assert(pool.active_threads() == 0);
 }
 
 static void testLoggerWritesFileAndFiltersLevel() {
@@ -167,6 +224,9 @@ static void testConfigFileParsingAndPrecedence() {
         ofs << "appendfsync = always\n";
         ofs << "replicaof = 127.0.0.1:7000\n";
         ofs << "replicas = 127.0.0.1:7001,127.0.0.1:7002\n";
+        ofs << "replication_backlog_size = 321\n";
+        ofs << "replication_sync_interval_ms = 750\n";
+        ofs << "replication_reconnect_delay_ms = 250\n";
         ofs << "requirepass = from-file\n";
         ofs << "acl_user = reader:reader-pass:readonly\n";
         ofs << "user = writer password=writer-pass role=readwrite\n";
@@ -221,6 +281,9 @@ static void testConfigFileParsingAndPrecedence() {
     assert(config.appendfsync == "always");
     assert(config.replicaof == "127.0.0.1:7000");
     assert(config.replicas_str == "127.0.0.1:7001,127.0.0.1:7002");
+    assert(config.replication_backlog_size == 321);
+    assert(config.replication_sync_interval_ms == 750);
+    assert(config.replication_reconnect_delay_ms == 250);
     assert(config.requirepass == "from-cli");
     assert(config.acl_users.size() == 4);
     assert(config.acl_users[0].username == "reader");
@@ -260,6 +323,75 @@ static void testConfigFileParsingAndPrecedence() {
     unsetenv("MINIREDIS_MAX_CLIENTS");
     unsetenv("MINIREDIS_MAX_VALUE_BYTES");
     std::filesystem::remove(path);
+}
+
+static void testConfigRejectsRemoteBindWithoutAuth() {
+    unsetenv("MINIREDIS_REQUIREPASS");
+    unsetenv("MINIREDIS_ACL_USERS");
+
+    {
+        std::vector<std::string> args = {
+            "miniredis",
+            "--bind", "0.0.0.0"
+        };
+        std::vector<char*> argv;
+        argv.reserve(args.size());
+        for (auto& arg : args) {
+            argv.push_back(arg.data());
+        }
+
+        AppConfig config;
+        assert(parseConfig(static_cast<int>(argv.size()), argv.data(), config) == ConfigParseResult::Error);
+    }
+
+    {
+        std::vector<std::string> args = {
+            "miniredis",
+            "--bind", "0.0.0.0",
+            "--requirepass", "secret"
+        };
+        std::vector<char*> argv;
+        argv.reserve(args.size());
+        for (auto& arg : args) {
+            argv.push_back(arg.data());
+        }
+
+        AppConfig config;
+        assert(parseConfig(static_cast<int>(argv.size()), argv.data(), config) == ConfigParseResult::Ok);
+    }
+}
+
+static void testConfigRejectsMalformedNumbers() {
+    {
+        std::vector<std::string> args = {"miniredis", "--port", "6366junk"};
+        std::vector<char*> argv;
+        for (auto& arg : args) argv.push_back(arg.data());
+        AppConfig config;
+        assert(parseConfig(static_cast<int>(argv.size()), argv.data(), config) ==
+               ConfigParseResult::Error);
+    }
+    {
+        std::vector<std::string> args = {"miniredis", "--maxmemory", "-1"};
+        std::vector<char*> argv;
+        for (auto& arg : args) argv.push_back(arg.data());
+        AppConfig config;
+        assert(parseConfig(static_cast<int>(argv.size()), argv.data(), config) ==
+               ConfigParseResult::Error);
+    }
+
+    setenv("MINIREDIS_MAX_CLIENTS", "100oops", 1);
+    std::vector<std::string> args = {"miniredis"};
+    std::vector<char*> argv{args[0].data()};
+    AppConfig config;
+    assert(parseConfig(static_cast<int>(argv.size()), argv.data(), config) ==
+           ConfigParseResult::Error);
+    unsetenv("MINIREDIS_MAX_CLIENTS");
+
+    int port = 0;
+    assert(!parseNodePort("127.0.0.1:6366junk", port));
+    assert(!parseNodePort("127.0.0.1:-1", port));
+    assert(parseNodePort("127.0.0.1:6366", port));
+    assert(port == 6366);
 }
 
 static void testCacheStore() {
@@ -481,6 +613,20 @@ static void testFilePersistenceBackupRecovery() {
     assert(recovered["stable"].value == "one");
     assert(std::filesystem::exists(path.string() + ".bad"));
 
+    {
+        std::ofstream empty(path, std::ios::binary | std::ios::trunc);
+    }
+    recovered.clear();
+    assert(persistence.loadSnapshot(recovered));
+    assert(recovered.size() == 1);
+    assert(recovered["stable"].value == "one");
+
+    std::filesystem::remove(path);
+    recovered.clear();
+    assert(persistence.loadSnapshot(recovered));
+    assert(recovered.size() == 1);
+    assert(recovered["stable"].value == "one");
+
     std::filesystem::remove(path);
     std::filesystem::remove(path.string() + ".bak");
     std::filesystem::remove(path.string() + ".bad");
@@ -526,6 +672,7 @@ static void testAppendOnlyFileIgnoresIncompleteTail() {
         assert(aof.appendSet("survives", "ok", 0));
         aof.close();
     }
+    const auto valid_size = std::filesystem::file_size(path);
 
     {
         std::ofstream ofs(path, std::ios::binary | std::ios::app);
@@ -538,6 +685,20 @@ static void testAppendOnlyFileIgnoresIncompleteTail() {
     assert(data.size() == 1);
     assert(data["survives"].value == "ok");
     assert(data.find("broken") == data.end());
+    assert(std::filesystem::file_size(path) == valid_size);
+
+    {
+        AppendOnlyFile aof(path.string(), AppendFsyncPolicy::Always);
+        assert(aof.open());
+        assert(aof.appendSet("after-repair", "visible", 0));
+        aof.close();
+    }
+
+    SnapshotData after_restart;
+    assert(reader.replay(after_restart));
+    assert(after_restart.size() == 2);
+    assert(after_restart["survives"].value == "ok");
+    assert(after_restart["after-repair"].value == "visible");
 
     std::filesystem::remove(path);
 }
@@ -907,6 +1068,21 @@ static void testClusterConfigStore() {
     assert(meta.peer_node == "127.0.0.1:6367");
     assert(loaded.GetEpoch() == slot_map.GetEpoch());
 
+    {
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        out << "MINIREDIS_CLUSTER_CONFIG_V1\n"
+            << "epoch 9\n"
+            << "nodes 2\n"
+            << "node 127.0.0.1:6366 healthy\n"
+            << "node 127.0.0.1:6367 healthy\n"
+            << "slots 2\n"
+            << "slot 0 10 127.0.0.1:6366\n"
+            << "slot 10 20 127.0.0.1:6367\n"
+            << "slotstates 0\n";
+    }
+    ClusterSlotMap invalid;
+    assert(!loadClusterConfig(path.string(), invalid));
+
     std::filesystem::remove(path);
     std::filesystem::remove(path.string() + ".tmp");
 }
@@ -1169,6 +1345,9 @@ static void testClusterImportingAllowsMigrationWrites() {
            RespWriter::simpleString("OK"));
     assert(handler.handle(command({"SET", key, "blocked"}), session).find("-MOVED ") == 0);
     assert(handler.handle(command({"ASKING"}), session) == RespWriter::simpleString("OK"));
+    assert(handler.handle(command({"PING"}), session) == RespWriter::simpleString("PONG"));
+    assert(handler.handle(command({"SET", key, "still-blocked"}), session).find("-MOVED ") == 0);
+    assert(handler.handle(command({"ASKING"}), session) == RespWriter::simpleString("OK"));
     assert(handler.handle(command({"SET", key, "after"}), session) ==
            RespWriter::simpleString("OK"));
     assert(cache.get(key).value_or("") == "after");
@@ -1233,9 +1412,21 @@ static void testAclRoles() {
     FixedMemoryPool pool(4);
     CacheStore cache(pool);
     AppConfig config;
-    config.acl_users.push_back(AclUser{"reader", "reader-pass", AclRole::ReadOnly});
-    config.acl_users.push_back(AclUser{"writer", "writer-pass", AclRole::ReadWrite});
-    config.acl_users.push_back(AclUser{"admin", "admin-pass", AclRole::Admin});
+    AclUser reader;
+    reader.username = "reader";
+    reader.password = "reader-pass";
+    reader.role = AclRole::ReadOnly;
+    config.acl_users.push_back(reader);
+    AclUser writer;
+    writer.username = "writer";
+    writer.password = "writer-pass";
+    writer.role = AclRole::ReadWrite;
+    config.acl_users.push_back(writer);
+    AclUser admin;
+    admin.username = "admin";
+    admin.password = "admin-pass";
+    admin.role = AclRole::Admin;
+    config.acl_users.push_back(admin);
     AclUser tenant;
     tenant.username = "tenant";
     tenant.password = "tenant-pass";
@@ -1438,12 +1629,12 @@ static void testCommandStringOps() {
     assert(handler.handle(command({"GET", "n"}), authenticated) ==
            RespWriter::bulkString("40!"));
     assert(handler.handle(command({"INCR", "n"}), authenticated) ==
-           RespWriter::error("ERR value is not an integer or out of range"));
+           RespWriter::error("value is not an integer or out of range"));
 
     assert(handler.handle(command({"SET", "max", "9223372036854775807"}), authenticated) ==
            RespWriter::simpleString("OK"));
     assert(handler.handle(command({"INCR", "max"}), authenticated) ==
-           RespWriter::error("ERR increment or decrement would overflow"));
+           RespWriter::error("increment or decrement would overflow"));
 
     assert(handler.handle(command({"SET", "ttl-key", "abc", "EX", "10"}), authenticated) ==
            RespWriter::simpleString("OK"));
@@ -1634,10 +1825,16 @@ static void testCommandReplicationBacklogPsync() {
     assert(parsed->array[2].array[0].array[0].integer == 1);
     assert(parsed->array[2].array[0].array[1].array[0].str == "REPLSET");
 
-    assert(replica.handle(command({"REPLAPPLY", "7", "REPLSET", "applied", "ok", "0"}),
+    assert(replica.handle(command({"REPLAPPLY", "2", "REPLSET", "applied", "gap", "0"}),
+                          authenticated) ==
+           RespWriter::error("REPLGAP expected offset 1 but got 2"));
+    assert(replica.handle(command({"REPLAPPLY", "1", "REPLSET", "applied", "ok", "0"}),
                           authenticated) == RespWriter::simpleString("OK"));
-    assert(replica_offset.load() == 7);
-    assert(persisted_offset == 7);
+    assert(replica_offset.load() == 1);
+    assert(persisted_offset == 1);
+    assert(replica.handle(command({"REPLACK"}), authenticated) == RespWriter::integer(1));
+    assert(replica.handle(command({"REPLAPPLY", "1", "REPLSET", "applied", "duplicate", "0"}),
+                          authenticated) == RespWriter::simpleString("OK"));
     assert(replica.handle(command({"GET", "applied"}), authenticated) ==
            RespWriter::bulkString("ok"));
 
@@ -1699,7 +1896,7 @@ static void testCommandMetadata() {
     bool authenticated = true;
 
     std::string count_response = handler.handle(command({"COMMAND", "COUNT"}), authenticated);
-    assert(count_response == ":33\r\n");
+    assert(count_response == ":34\r\n");
 
     std::string table_response = handler.handle(command({"COMMAND"}), authenticated);
     RespDecoder decoder;
@@ -1707,7 +1904,7 @@ static void testCommandMetadata() {
     auto parsed = decoder.parse();
     assert(parsed.has_value());
     assert(parsed->type == RespType::ARRAY);
-    assert(parsed->array.size() == 33);
+    assert(parsed->array.size() == 34);
 
     bool saw_acl = false;
     bool saw_asking = false;
@@ -1855,6 +2052,20 @@ static void testCommandMetadata() {
     assert(saw_info);
     assert(saw_slowlog);
     assert(saw_cluster);
+
+    std::string info_response = handler.handle(command({"COMMAND", "INFO", "GET", "SET", "missing"}), authenticated);
+    RespDecoder info_decoder;
+    info_decoder.feed(info_response);
+    auto info = info_decoder.parse();
+    assert(info.has_value());
+    assert(info->type == RespType::ARRAY);
+    assert(info->array.size() == 3);
+    assert(info->array[0].type == RespType::ARRAY);
+    assert(info->array[0].array[0].str == "get");
+    assert(info->array[1].type == RespType::ARRAY);
+    assert(info->array[1].array[0].str == "set");
+    assert(info->array[2].type == RespType::BULK_STRING);
+    assert(info->array[2].str.empty());
 }
 
 static void testStatsReadinessExport() {
@@ -1867,6 +2078,7 @@ static void testStatsReadinessExport() {
     Stats::instance().setAofRewriteBufferBytes(12);
     Stats::instance().recordAofRewriteResult(true, 2, 9);
     Stats::instance().setAofRewriteRunning(false);
+    Stats::instance().setReplicationState(2, 1, 10, 8, 2, 3, 4, 5);
     std::string json = Stats::instance().toJson();
     std::string metrics = Stats::instance().toPrometheus();
     assert(json.find("\"ready\":false") != std::string::npos);
@@ -1875,12 +2087,16 @@ static void testStatsReadinessExport() {
     assert(json.find("\"snapshot_last_key_count\":3") != std::string::npos);
     assert(json.find("\"aof_last_rewrite_records\":2") != std::string::npos);
     assert(json.find("\"aof_rewrite_last_status\":\"ok\"") != std::string::npos);
+    assert(json.find("\"replication_connected_replicas\":1") != std::string::npos);
+    assert(json.find("\"replication_pending_offsets\":2") != std::string::npos);
     assert(metrics.find("miniredis_ready 0") != std::string::npos);
     assert(metrics.find("miniredis_io_threads") != std::string::npos);
     assert(metrics.find("miniredis_max_request_bytes 1024") != std::string::npos);
     assert(metrics.find("miniredis_snapshot_last_key_count 3") != std::string::npos);
     assert(metrics.find("miniredis_aof_last_rewrite_records 2") != std::string::npos);
     assert(metrics.find("miniredis_aof_rewrite_last_status_info") != std::string::npos);
+    assert(metrics.find("miniredis_replication_connected_replicas 1") != std::string::npos);
+    assert(metrics.find("miniredis_replication_backlog_misses 5") != std::string::npos);
 
     Stats::instance().setReady(true);
     json = Stats::instance().toJson();
@@ -1894,10 +2110,14 @@ int main() {
     testRespParser();
     testRespParserHandlesPartialFrame();
     testRespParserHandlesPipelinedFrames();
+    testRespParserRejectsMalformedFrames();
     testMemoryPoolGrow();
     testThreadPoolRejectsSubmitAfterStop();
+    testThreadPoolDoesNotShrinkBelowMinimum();
     testLoggerWritesFileAndFiltersLevel();
     testConfigFileParsingAndPrecedence();
+    testConfigRejectsRemoteBindWithoutAuth();
+    testConfigRejectsMalformedNumbers();
     testCacheStore();
     testCacheStoreShards();
     testCacheStoreMaxmemoryNoEviction();

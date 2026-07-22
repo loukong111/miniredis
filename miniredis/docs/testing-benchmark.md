@@ -21,6 +21,7 @@ ctest --test-dir build --output-on-failure
 
 - Release 构建、单元测试和 redis-cli/curl 集成冒烟测试
 - recovery/soak smoke，覆盖强杀恢复、坏快照回退和监控端点
+- resource/failure smoke，覆盖 maxmemory、LRU、AOF rewrite、AOF 坏尾和 rewrite tmp 清理
 - Debug + ASan/UBSan 单元测试
 - Docker image build 检查
 
@@ -47,7 +48,7 @@ scripts/replica_demo.sh smoke
 ```
 
 其中 `migrate-smoke` 会启动三节点集群，写入属于首节点的 key，执行 `CLUSTER MIGRATE <slot> <target-node>`，再验证源节点 key 数归零、目标节点可读到迁移后的 value。
-`replica_demo.sh smoke` 会先启动 master 写入历史数据，再启动 replica 验证启动全量同步；随后验证写命令能复制到 replica，并验证 replica 普通写请求返回 `READONLY`。
+`replica_demo.sh smoke` 会先验证启动同步和 replica 只读保护，再停止 replica、在 master 写入数据并重启 replica，验证主写入不等待离线副本且 replica 能通过 backlog 自动追平。
 
 ## 单元测试覆盖
 
@@ -107,6 +108,27 @@ scripts/recovery_soak.sh
 
 ```bash
 REQUESTS=100000 CLIENTS=50 SOAK_SECONDS=60 scripts/recovery_soak.sh
+```
+
+资源与故障压测脚本：
+
+```bash
+scripts/resource_failure_soak.sh
+```
+
+这个脚本更偏上线前检查，会覆盖：
+
+- `maxmemory noeviction` 下超大写入返回 OOM
+- `maxmemory lru` 下高频写入触发 evicted_keys
+- AOF rewrite 完成后重启恢复
+- AOF 坏尾被忽略，坏尾命令不会生效
+- 残留 `.rewrite.tmp` 启动时被清理，旧 AOF 不被错误替换
+- 短时并发压测后检查 `/healthz`、`/readyz`、`/stats`、`/metrics`
+
+默认参数比较温和，适合作为 CI smoke；上线前可以放大：
+
+```bash
+REQUESTS=100000 CLIENTS=50 scripts/resource_failure_soak.sh
 ```
 
 默认参数：

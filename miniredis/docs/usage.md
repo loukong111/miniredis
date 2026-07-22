@@ -183,6 +183,9 @@ redis-cli -p 6366 -a "${MINIREDIS_REQUIREPASS:-change-me}" INFO stats
 --appendfsync policy      no、everysec 或 always，默认 everysec
 --replicaof ip:port       以只读 replica 模式跟随指定 master
 --replicas a:port,b:port  master 侧写命令转发的 replica 列表
+--replication-backlog-size count  增量复制 backlog 条目上限，默认 10000
+--replication-sync-interval-ms ms  replica 主动追平间隔，默认 1000
+--replication-reconnect-delay-ms ms  master 后台复制重连间隔，默认 500
 --requirepass password    启用 AUTH
 --acl-user spec 添加 ACL 用户，支持 user:pass:role，也支持 user password=pass role=readwrite commands=get,set,mget keys=app:* enabled=true，可重复传
 --max-request-bytes bytes 单连接最大请求缓冲，默认 16777216
@@ -323,17 +326,18 @@ systemd 示例位于：
 deploy/miniredis.service
 ```
 
-示例安装步骤：
+生产部署推荐直接参考 [生产部署指南](production-deploy.md)。如果手动安装，可以使用下面的最小流程：
 
 ```bash
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin miniredis
 sudo mkdir -p /opt/miniredis /var/lib/miniredis /var/log/miniredis /etc/miniredis
 sudo cp build/miniredis /opt/miniredis/
+sudo cp config/miniredis.prod.conf /etc/miniredis/miniredis.conf
 sudo cp deploy/miniredis.service /etc/systemd/system/miniredis.service
 sudo chown -R miniredis:miniredis /var/lib/miniredis
 sudo chown -R miniredis:miniredis /var/log/miniredis
-sudo install -m 600 /dev/null /etc/miniredis/miniredis.env
-echo 'MINIREDIS_REQUIREPASS=change-me' | sudo tee /etc/miniredis/miniredis.env
+sudo install -m 600 deploy/miniredis.env.example /etc/miniredis/miniredis.env
+sudoedit /etc/miniredis/miniredis.env
 sudo systemctl daemon-reload
 sudo systemctl enable --now miniredis
 ```

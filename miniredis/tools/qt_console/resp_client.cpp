@@ -55,9 +55,9 @@ void RespClient::sendCommand(const QStringList& parts) {
 void RespClient::onReadyRead() {
     buffer_.append(socket_.readAll());
     while (true) {
-        QString response = tryParseResponse();
-        if (response.isEmpty()) break;
-        emit responseReceived(response);
+        auto response = tryParseResponse();
+        if (!response) break;
+        emit responseReceived(*response);
     }
 }
 
@@ -71,11 +71,11 @@ QByteArray RespClient::encodeCommand(const QStringList& parts) const {
     return out;
 }
 
-QString RespClient::tryParseResponse() {
+std::optional<QString> RespClient::tryParseResponse() {
     int pos = 0;
     bool ok = true;
     QString parsed = parseValue(pos, ok);
-    if (!ok) return {};
+    if (!ok) return std::nullopt;
     buffer_.remove(0, pos);
     return parsed;
 }
@@ -117,13 +117,17 @@ QString RespClient::parseValue(int& pos, bool& ok, int depth, bool in_array) con
         }
         bool len_ok = false;
         int len = QString::fromUtf8(buffer_.mid(pos + 1, len_end - pos - 1)).toInt(&len_ok);
-        if (!len_ok) {
+        if (!len_ok || len < -1) {
             ok = false;
             return {};
         }
         pos = len_end + 2;
         if (len == -1) return "(nil)";
         if (buffer_.size() < pos + len + 2) {
+            ok = false;
+            return {};
+        }
+        if (buffer_.mid(pos + len, 2) != "\r\n") {
             ok = false;
             return {};
         }

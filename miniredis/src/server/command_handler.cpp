@@ -2,6 +2,7 @@
 #include "miniredis/cluster/cluster_utils.hpp"
 #include "miniredis/core/logger.hpp"
 #include "miniredis/metrics/stats.hpp"
+#include "miniredis/server/replication_dispatcher.hpp"
 #include <algorithm>
 #include <arpa/inet.h>
 #include <cerrno>
@@ -64,6 +65,7 @@ const std::vector<CommandSpec>& commandTable() {
         {"replsnapshot", 1, {"admin", "readonly"}, 0, 0, 0},
         {"replfullsync", 1, {"admin", "readonly"}, 0, 0, 0},
         {"replpsync", 2, {"admin", "readonly"}, 0, 0, 0},
+        {"replack", 1, {"admin", "readonly", "fast"}, 0, 0, 0},
         {"replapply", -3, {"admin", "write"}, 0, 0, 0},
         {"cluster",-2, {"admin", "stale"},       0,  0, 0},
     };
@@ -230,6 +232,30 @@ std::string toUpper(std::string value) {
     return value;
 }
 
+const CommandSpec* findCommandSpec(const std::string& command) {
+    std::string normalized = toUpper(command);
+    for (const auto& spec : commandTable()) {
+        if (normalized == toUpper(spec.name)) {
+            return &spec;
+        }
+    }
+    return nullptr;
+}
+
+std::string commandInfoResponse(const RespValue& cmd) {
+    std::vector<std::string> commands;
+    commands.reserve(cmd.array.size() - 2);
+    for (size_t i = 2; i < cmd.array.size(); ++i) {
+        if (cmd.array[i].type != RespType::BULK_STRING) {
+            commands.push_back(RespWriter::nullBulkString());
+            continue;
+        }
+        const CommandSpec* spec = findCommandSpec(cmd.array[i].str);
+        commands.push_back(spec ? commandSpecResponse(*spec) : RespWriter::nullBulkString());
+    }
+    return respArray(commands);
+}
+
 bool parsePositiveInt(const std::string& value, int& out) {
     auto [ptr, ec] = std::from_chars(value.data(), value.data() + value.size(), out);
     return ec == std::errc() && ptr == value.data() + value.size() && out > 0;
@@ -326,7 +352,7 @@ bool sendClusterCommandToNode(const std::string& node,
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
+    addr.sin_port = htons(static_cast<uint16_t>(port));
     if (::inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1 ||
         ::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
         ::close(fd);
@@ -363,7 +389,7 @@ bool sendAskingCommandToNode(const std::string& node,
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
+    addr.sin_port = htons(static_cast<uint16_t>(port));
     if (::inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1 ||
         ::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
         ::close(fd);
@@ -528,7 +554,10 @@ CommandHandler::CommandHandler(CacheStore& cache, FixedMemoryPool& memory_pool,
                                std::function<void()> cluster_change_callback,
                                ReplicationBacklog* replication_backlog,
                                std::atomic<uint64_t>* replication_offset,
-                               std::function<void(uint64_t)> replication_offset_callback)
+                               std::function<void(uint64_t)> replication_offset_callback,
+                               ReplicationDispatcher* replication_dispatcher,
+                               std::mutex* replication_apply_mutex,
+                               std::function<void()> replica_promoted_callback)
     : cache_(cache),
       memory_pool_(memory_pool),
       config_(config),
@@ -540,7 +569,10 @@ CommandHandler::CommandHandler(CacheStore& cache, FixedMemoryPool& memory_pool,
       cluster_change_callback_(std::move(cluster_change_callback)),
       replication_backlog_(replication_backlog),
       replication_offset_(replication_offset),
-      replication_offset_callback_(std::move(replication_offset_callback)) {}
+      replication_offset_callback_(std::move(replication_offset_callback)),
+      replication_dispatcher_(replication_dispatcher),
+      replication_apply_mutex_(replication_apply_mutex),
+      replica_promoted_callback_(std::move(replica_promoted_callback)) {}
 
 bool CommandHandler::isReplica() const {
     return !config_.replicaof.empty() && !promoted_to_master_;
@@ -747,7 +779,7 @@ void CommandHandler::refreshRuntimeStats() const {
 }
 
 std::string CommandHandler::routeIfNeeded(const std::string& cmd_name, const RespValue& cmd,
-                                          CommandSession& session) const {
+                                          bool asking) const {
     bool needs_route = (cmd_name == "GET" || cmd_name == "SET" ||
                         cmd_name == "DEL" || cmd_name == "EXISTS" ||
                         cmd_name == "MGET" || cmd_name == "SETNX" ||
@@ -800,10 +832,7 @@ std::string CommandHandler::routeIfNeeded(const std::string& cmd_name, const Res
     if (target != current_node_) {
         if (slot_meta.state == ClusterSlotState::Importing &&
             slot_meta.peer_node == target) {
-            if (session.asking) {
-                session.asking = false;
-                return {};
-            }
+            if (asking) return {};
             return "-MOVED " + std::to_string(slot) + " " + target + "\r\n";
         }
         return "-MOVED " + std::to_string(slot) + " " + target + "\r\n";
@@ -930,6 +959,16 @@ std::string CommandHandler::handleInfoCommand(const RespValue& cmd) const {
 
     if (wants_replication) {
         auto replicas = splitNodeList(config_.replicas_str);
+        std::vector<ReplicaDispatchStatus> replica_status;
+        if (replication_dispatcher_) replica_status = replication_dispatcher_->status();
+        size_t connected_replicas = 0;
+        uint64_t dispatch_errors = 0;
+        uint64_t backlog_misses = 0;
+        for (const auto& status : replica_status) {
+            if (status.connected) ++connected_replicas;
+            dispatch_errors += status.errors;
+            backlog_misses += status.backlog_misses;
+        }
         oss << "# Replication\r\n";
         oss << "role:" << (isReplica() ? "slave" : "master") << "\r\n";
         oss << "master_node:" << (isReplica() ? config_.replicaof : "") << "\r\n";
@@ -942,9 +981,27 @@ std::string CommandHandler::handleInfoCommand(const RespValue& cmd) const {
         oss << "repl_backlog_active:" << (replication_backlog_ ? "1" : "0") << "\r\n";
         oss << "repl_backlog_histlen:"
             << (replication_backlog_ ? replication_backlog_->size() : 0) << "\r\n";
-        oss << "connected_slaves:" << replicas.size() << "\r\n";
-        for (size_t i = 0; i < replicas.size(); ++i) {
-            oss << "slave" << i << ":addr=" << replicas[i] << ",state=online\r\n";
+        oss << "connected_slaves:"
+            << (replication_dispatcher_ ? connected_replicas : 0) << "\r\n";
+        oss << "repl_dispatch_errors:" << dispatch_errors << "\r\n";
+        oss << "repl_backlog_misses:" << backlog_misses << "\r\n";
+        if (!replica_status.empty()) {
+            for (size_t i = 0; i < replica_status.size(); ++i) {
+                const auto& status = replica_status[i];
+                const uint64_t lag = status.target_offset > status.acknowledged_offset
+                                         ? status.target_offset - status.acknowledged_offset
+                                         : 0;
+                oss << "slave" << i << ":addr=" << status.node
+                    << ",state=" << (status.connected ? "online" : "offline")
+                    << ",offset=" << status.acknowledged_offset
+                    << ",lag=" << lag
+                    << ",reconnects=" << status.reconnects
+                    << ",errors=" << status.errors << "\r\n";
+            }
+        } else {
+            for (size_t i = 0; i < replicas.size(); ++i) {
+                oss << "slave" << i << ":addr=" << replicas[i] << ",state=offline\r\n";
+            }
         }
         oss << "\r\n";
     }
@@ -1040,26 +1097,7 @@ void CommandHandler::replicateWrite(const std::vector<std::string>& command) con
         offset = replication_backlog_->append(command);
     }
 
-    auto replicas = splitNodeList(config_.replicas_str);
-    if (replicas.empty()) return;
-
-    std::vector<std::string> wire_command = command;
-    if (offset > 0) {
-        wire_command.clear();
-        wire_command.reserve(command.size() + 2);
-        wire_command.push_back("REPLAPPLY");
-        wire_command.push_back(std::to_string(offset));
-        wire_command.insert(wire_command.end(), command.begin(), command.end());
-    }
-
-    for (const auto& replica : replicas) {
-        std::string response;
-        if (!sendClusterCommandToNode(replica, config_.requirepass, wire_command, response) ||
-            response.rfind("+OK", 0) != 0) {
-            MINIREDIS_LOG_WARN("replication")
-                << "failed to replicate command to " << replica;
-        }
-    }
+    if (replication_dispatcher_ && offset > 0) replication_dispatcher_->notify(offset);
 }
 
 std::string CommandHandler::handleReplicationCommand(const std::string& cmd_name, const RespValue& cmd) {
@@ -1067,7 +1105,6 @@ std::string CommandHandler::handleReplicationCommand(const std::string& cmd_name
         if (cmd.array.size() != 1) {
             return RespWriter::error("wrong number of arguments for 'replsnapshot'");
         }
-        refreshRuntimeStats();
         return replicationSnapshotResponse(cache_.snapshot());
     }
 
@@ -1075,7 +1112,6 @@ std::string CommandHandler::handleReplicationCommand(const std::string& cmd_name
         if (cmd.array.size() != 1) {
             return RespWriter::error("wrong number of arguments for 'replfullsync'");
         }
-        refreshRuntimeStats();
         uint64_t offset = replication_backlog_ ? replication_backlog_->currentOffset() : 0;
         return replicationFullSyncResponse(offset, cache_.snapshot());
     }
@@ -1096,6 +1132,16 @@ std::string CommandHandler::handleReplicationCommand(const std::string& cmd_name
         return replicationPsyncResponse(current_offset, entries);
     }
 
+    if (cmd_name == "REPLACK") {
+        if (cmd.array.size() != 1) {
+            return RespWriter::error("wrong number of arguments for 'replack'");
+        }
+        const uint64_t offset = replication_offset_
+                                    ? replication_offset_->load(std::memory_order_acquire)
+                                    : (replication_backlog_ ? replication_backlog_->currentOffset() : 0);
+        return RespWriter::integer(static_cast<long long>(offset));
+    }
+
     if (cmd_name == "REPLAPPLY") {
         if (cmd.array.size() < 4 || cmd.array[1].type != RespType::BULK_STRING ||
             cmd.array[2].type != RespType::BULK_STRING) {
@@ -1106,6 +1152,20 @@ std::string CommandHandler::handleReplicationCommand(const std::string& cmd_name
             return RespWriter::error("invalid replication offset");
         }
 
+        std::unique_lock<std::mutex> apply_lock;
+        if (replication_apply_mutex_) {
+            apply_lock = std::unique_lock<std::mutex>(*replication_apply_mutex_);
+        }
+        if (replication_offset_) {
+            const uint64_t current = replication_offset_->load(std::memory_order_acquire);
+            if (offset <= current) return RespWriter::simpleString("OK");
+            if (offset != current + 1) {
+                return RespWriter::error("REPLGAP expected offset " +
+                                         std::to_string(current + 1) + " but got " +
+                                         std::to_string(offset));
+            }
+        }
+
         RespValue inner;
         inner.type = RespType::ARRAY;
         inner.array.reserve(cmd.array.size() - 2);
@@ -1114,7 +1174,8 @@ std::string CommandHandler::handleReplicationCommand(const std::string& cmd_name
         }
         std::string inner_name = toUpper(inner.array[0].str);
         if (inner_name == "REPLAPPLY" || inner_name == "REPLSNAPSHOT" ||
-            inner_name == "REPLFULLSYNC" || inner_name == "REPLPSYNC") {
+            inner_name == "REPLFULLSYNC" || inner_name == "REPLPSYNC" ||
+            inner_name == "REPLACK") {
             return RespWriter::error("invalid nested replication command");
         }
         std::string response = handleReplicationCommand(inner_name, inner);
@@ -1148,7 +1209,6 @@ std::string CommandHandler::handleReplicationCommand(const std::string& cmd_name
         int ttl_seconds = static_cast<int>(ttl_seconds_size);
         SetResult result = cache_.set(cmd.array[1].str, cmd.array[2].str, ttl_seconds);
         Stats::instance().recordSet();
-        refreshRuntimeStats();
         if (result != SetResult::Ok) {
             return result == SetResult::OutOfMemory
                        ? RespWriter::error("OOM maxmemory limit reached")
@@ -1176,7 +1236,6 @@ std::string CommandHandler::handleReplicationCommand(const std::string& cmd_name
             }
         }
         Stats::instance().recordCommand(cmd_name);
-        refreshRuntimeStats();
         if (aof_ && !deleted_keys.empty() && !aof_->appendDel(deleted_keys)) {
             MINIREDIS_LOG_ERROR("aof") << "failed to append replicated DEL command";
         }
@@ -1197,7 +1256,6 @@ std::string CommandHandler::handleReplicationCommand(const std::string& cmd_name
         }
         bool updated = cache_.expire(cmd.array[1].str, ttl_seconds);
         Stats::instance().recordCommand(cmd_name);
-        refreshRuntimeStats();
         if (aof_ && updated && !aof_->appendExpire(cmd.array[1].str, ttl_seconds)) {
             MINIREDIS_LOG_ERROR("aof") << "failed to append replicated EXPIRE command";
         }
@@ -1341,7 +1399,6 @@ std::string CommandHandler::handleClusterMigrate(const RespValue& cmd) {
         }
     }
     if (cluster_change_callback_) cluster_change_callback_();
-    refreshRuntimeStats();
     return RespWriter::integer(static_cast<long long>(migrated_keys.size()));
 }
 
@@ -1614,6 +1671,7 @@ std::string CommandHandler::handleClusterFailover(const RespValue& cmd) {
     }
 
     promoted_to_master_ = true;
+    if (replica_promoted_callback_) replica_promoted_callback_();
     if (cluster_change_callback_) cluster_change_callback_();
     MINIREDIS_LOG_WARN("cluster") << "manual failover promoted " << current_node_
                                   << " from master " << config_.replicaof
@@ -1641,6 +1699,9 @@ std::string CommandHandler::handle(const RespValue& cmd, CommandSession& session
 
     std::string cmd_name = first.str;
     cmd_name = toUpper(std::move(cmd_name));
+    const bool asking_for_command = cmd_name == "ASKING"
+                                        ? false
+                                        : std::exchange(session.asking, false);
 
     if (cmd_name == "AUTH") {
         Stats::instance().recordCommand(cmd_name);
@@ -1688,7 +1749,7 @@ std::string CommandHandler::handle(const RespValue& cmd, CommandSession& session
 
     if (cmd_name == "REPLSET" || cmd_name == "REPLDEL" ||
         cmd_name == "REPLEXPIRE" || cmd_name == "REPLSNAPSHOT" ||
-        cmd_name == "REPLFULLSYNC" || cmd_name == "REPLPSYNC" ||
+        cmd_name == "REPLFULLSYNC" || cmd_name == "REPLPSYNC" || cmd_name == "REPLACK" ||
         cmd_name == "REPLAPPLY") {
         Stats::instance().recordCommand(cmd_name);
         return handleReplicationCommand(cmd_name, cmd);
@@ -1704,7 +1765,7 @@ std::string CommandHandler::handle(const RespValue& cmd, CommandSession& session
         return handleClusterCommand(cmd);
     }
 
-    std::string route_response = routeIfNeeded(cmd_name, cmd, session);
+    std::string route_response = routeIfNeeded(cmd_name, cmd, asking_for_command);
     if (!route_response.empty()) {
         Stats::instance().recordCommand(cmd_name);
         return route_response;
@@ -1716,7 +1777,6 @@ std::string CommandHandler::handle(const RespValue& cmd, CommandSession& session
         std::string key_error = validateKey(key_arg);
         if (!key_error.empty()) return key_error;
         auto val = cache_.get(key_arg.str);
-        refreshRuntimeStats();
         if (val) {
             Stats::instance().recordGetHit();
             return RespWriter::bulkString(*val);
@@ -1731,7 +1791,6 @@ std::string CommandHandler::handle(const RespValue& cmd, CommandSession& session
         std::string key_error = validateKey(key_arg);
         if (!key_error.empty()) return key_error;
         auto val = cache_.get_and_delete(key_arg.str);
-        refreshRuntimeStats();
         if (!val) {
             Stats::instance().recordGetMiss();
             return RespWriter::nullBulkString();
@@ -1785,7 +1844,6 @@ std::string CommandHandler::handle(const RespValue& cmd, CommandSession& session
 
         auto val = (cmd.array.size() == 2) ? cache_.get(key_arg.str)
                                            : cache_.get_and_expire(key_arg.str, persist ? -1 : ttl_ms);
-        refreshRuntimeStats();
         if (!val) {
             Stats::instance().recordGetMiss();
             return RespWriter::nullBulkString();
@@ -1815,7 +1873,6 @@ std::string CommandHandler::handle(const RespValue& cmd, CommandSession& session
         if (!key_error.empty()) return key_error;
         auto val = cache_.get(key_arg.str);
         Stats::instance().recordCommand(cmd_name);
-        refreshRuntimeStats();
         return RespWriter::integer(static_cast<long long>(val ? val->size() : 0));
     }
 
@@ -1826,7 +1883,6 @@ std::string CommandHandler::handle(const RespValue& cmd, CommandSession& session
         if (!key_error.empty()) return key_error;
         bool present = cache_.exists(key_arg.str);
         Stats::instance().recordCommand(cmd_name);
-        refreshRuntimeStats();
         return RespWriter::simpleString(present ? "string" : "none");
     }
 
@@ -1842,7 +1898,6 @@ std::string CommandHandler::handle(const RespValue& cmd, CommandSession& session
             values.push_back(val ? RespWriter::bulkString(*val) : RespWriter::nullBulkString());
         }
         Stats::instance().recordCommand(cmd_name);
-        refreshRuntimeStats();
         return respArray(values);
     }
 
@@ -1868,9 +1923,8 @@ std::string CommandHandler::handle(const RespValue& cmd, CommandSession& session
                 return RespWriter::error("syntax error");
             }
         }
-SetResult set_result = cache_.set(key_arg.str, val_arg.str, ttl_seconds);
+        SetResult set_result = cache_.set(key_arg.str, val_arg.str, ttl_seconds);
         Stats::instance().recordSet();
-        refreshRuntimeStats();
         if (set_result == SetResult::Ok) {
             if (aof_ && !aof_->appendSet(key_arg.str, val_arg.str, ttl_seconds)) {
                 MINIREDIS_LOG_ERROR("aof") << "failed to append SET command";
@@ -1897,7 +1951,6 @@ SetResult set_result = cache_.set(key_arg.str, val_arg.str, ttl_seconds);
             }
         }
         Stats::instance().recordCommand(cmd_name);
-        refreshRuntimeStats();
         if (aof_ && !deleted_keys.empty() && !aof_->appendDel(deleted_keys)) {
             MINIREDIS_LOG_ERROR("aof") << "failed to append DEL command";
         }
@@ -1922,7 +1975,6 @@ SetResult set_result = cache_.set(key_arg.str, val_arg.str, ttl_seconds);
 
         ValueUpdateResult result = cache_.set_if_absent(key_arg.str, val_arg.str);
         Stats::instance().recordSet();
-        refreshRuntimeStats();
         if (result.status == SetResult::OutOfMemory) {
             return RespWriter::error("OOM maxmemory limit reached");
         }
@@ -1951,7 +2003,6 @@ SetResult set_result = cache_.set(key_arg.str, val_arg.str, ttl_seconds);
 
         ValueUpdateResult result = cache_.append(key_arg.str, suffix_arg.str);
         Stats::instance().recordSet();
-        refreshRuntimeStats();
         if (result.status == SetResult::OutOfMemory) {
             return RespWriter::error("OOM maxmemory limit reached");
         }
@@ -1983,11 +2034,11 @@ SetResult set_result = cache_.set(key_arg.str, val_arg.str, ttl_seconds);
             const RespValue& delta_arg = cmd.array[2];
             if (delta_arg.type != RespType::BULK_STRING ||
                 !parseInt64Strict(delta_arg.str, delta)) {
-                return RespWriter::error("ERR value is not an integer or out of range");
+                return RespWriter::error("value is not an integer or out of range");
             }
             if (cmd_name == "DECRBY") {
                 if (delta == std::numeric_limits<long long>::min()) {
-                    return RespWriter::error("ERR increment or decrement would overflow");
+                    return RespWriter::error("increment or decrement would overflow");
                 }
                 delta = -delta;
             }
@@ -1995,12 +2046,11 @@ SetResult set_result = cache_.set(key_arg.str, val_arg.str, ttl_seconds);
 
         IncrementResult result = cache_.increment(key_arg.str, delta);
         Stats::instance().recordSet();
-        refreshRuntimeStats();
         if (result.code == IncrementResultCode::NotInteger) {
-            return RespWriter::error("ERR value is not an integer or out of range");
+            return RespWriter::error("value is not an integer or out of range");
         }
         if (result.code == IncrementResultCode::Overflow) {
-            return RespWriter::error("ERR increment or decrement would overflow");
+            return RespWriter::error("increment or decrement would overflow");
         }
         if (result.code == IncrementResultCode::OutOfMemory) {
             return RespWriter::error("OOM maxmemory limit reached");
@@ -2026,7 +2076,6 @@ SetResult set_result = cache_.set(key_arg.str, val_arg.str, ttl_seconds);
             }
         }
         Stats::instance().recordCommand(cmd_name);
-        refreshRuntimeStats();
         return RespWriter::integer(count);
     }
 
@@ -2045,7 +2094,6 @@ SetResult set_result = cache_.set(key_arg.str, val_arg.str, ttl_seconds);
         }
         bool updated = cache_.expire(key_arg.str, ttl_seconds);
         Stats::instance().recordCommand(cmd_name);
-        refreshRuntimeStats();
         if (aof_ && updated && !aof_->appendExpire(key_arg.str, ttl_seconds)) {
             MINIREDIS_LOG_ERROR("aof") << "failed to append EXPIRE command";
         }
@@ -2070,7 +2118,6 @@ SetResult set_result = cache_.set(key_arg.str, val_arg.str, ttl_seconds);
         }
         bool updated = cache_.pexpire(key_arg.str, ttl_ms);
         Stats::instance().recordCommand(cmd_name);
-        refreshRuntimeStats();
         if (aof_ && updated && !aof_->appendPExpire(key_arg.str, ttl_ms)) {
             MINIREDIS_LOG_ERROR("aof") << "failed to append PEXPIRE command";
         }
@@ -2092,7 +2139,6 @@ SetResult set_result = cache_.set(key_arg.str, val_arg.str, ttl_seconds);
             val = cache_.get(key_arg.str);
         }
         Stats::instance().recordCommand(cmd_name);
-        refreshRuntimeStats();
         if (updated && val) {
             if (aof_ && !aof_->appendSet(key_arg.str, *val, 0)) {
                 MINIREDIS_LOG_ERROR("aof") << "failed to append PERSIST command as SET";
@@ -2109,7 +2155,6 @@ SetResult set_result = cache_.set(key_arg.str, val_arg.str, ttl_seconds);
         if (!key_error.empty()) return key_error;
         long long remaining = cache_.ttl(key_arg.str);
         Stats::instance().recordCommand(cmd_name);
-        refreshRuntimeStats();
         return RespWriter::integer(remaining);
     }
 
@@ -2120,7 +2165,6 @@ SetResult set_result = cache_.set(key_arg.str, val_arg.str, ttl_seconds);
         if (!key_error.empty()) return key_error;
         long long remaining = cache_.pttl(key_arg.str);
         Stats::instance().recordCommand(cmd_name);
-        refreshRuntimeStats();
         return RespWriter::integer(remaining);
     }
 
@@ -2151,7 +2195,6 @@ SetResult set_result = cache_.set(key_arg.str, val_arg.str, ttl_seconds);
         if (!aof_) {
             return RespWriter::error("AOF is not enabled");
         }
-        refreshRuntimeStats();
         if (!aof_->rewrite(cache_.snapshot())) {
             return RespWriter::error("AOF rewrite already running or failed to start");
         }
@@ -2168,6 +2211,13 @@ SetResult set_result = cache_.set(key_arg.str, val_arg.str, ttl_seconds);
             subcmd = toUpper(std::move(subcmd));
             if (subcmd == "COUNT") {
                 return RespWriter::integer(static_cast<long long>(commandTable().size()));
+            }
+        }
+        if (cmd.array.size() >= 2 && cmd.array[1].type == RespType::BULK_STRING) {
+            std::string subcmd = cmd.array[1].str;
+            subcmd = toUpper(std::move(subcmd));
+            if (subcmd == "INFO") {
+                return commandInfoResponse(cmd);
             }
         }
         return RespWriter::error("unsupported COMMAND subcommand");

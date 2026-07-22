@@ -6,6 +6,7 @@
 #include <QStringList>
 #include <QByteArray>
 #include <QChar>
+#include <optional>
 
 class RespClient : public QObject {
     Q_OBJECT
@@ -32,7 +33,7 @@ private slots:
 
 private:
     QByteArray encodeCommand(const QStringList& parts) const;
-    QString tryParseResponse();
+    std::optional<QString> tryParseResponse();
     QString parseValue(int& pos, bool& ok, int depth = 0, bool in_array = false) const;
     QString parseLineValue(int& pos, QChar prefix, const QString& label, bool& ok) const;
 

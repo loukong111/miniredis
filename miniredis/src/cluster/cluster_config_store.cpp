@@ -1,16 +1,31 @@
 #include "miniredis/cluster/cluster_config_store.hpp"
 #include "miniredis/core/logger.hpp"
+#include <cerrno>
+#include <cstring>
 #include <filesystem>
+#include <fcntl.h>
 #include <fstream>
 #include <sstream>
 #include <tuple>
 #include <unordered_set>
+#include <unistd.h>
 #include <vector>
 
 namespace miniredis {
 namespace {
 
 constexpr const char* kClusterConfigMagic = "MINIREDIS_CLUSTER_CONFIG_V1";
+constexpr size_t kMaxClusterNodes = 1024;
+
+bool fsyncPath(const std::string& path, bool directory) {
+    int flags = O_RDONLY;
+    if (directory) flags |= O_DIRECTORY;
+    int fd = ::open(path.c_str(), flags);
+    if (fd < 0) return false;
+    const bool ok = (::fsync(fd) == 0);
+    ::close(fd);
+    return ok;
+}
 
 bool writeSnapshot(std::ostream& out, const ClusterSlotMapSnapshot& snapshot) {
     out << kClusterConfigMagic << '\n';
@@ -102,6 +117,13 @@ bool saveClusterConfig(const std::string& path, const ClusterSlotMap& slot_map) 
         }
     }
 
+    if (!fsyncPath(tmp_path, false)) {
+        MINIREDIS_LOG_ERROR("cluster") << "failed to fsync cluster config temp file: "
+                                       << std::strerror(errno);
+        std::filesystem::remove(tmp_path);
+        return false;
+    }
+
     std::error_code ec;
     std::filesystem::rename(tmp_path, path, ec);
     if (ec) {
@@ -109,6 +131,11 @@ bool saveClusterConfig(const std::string& path, const ClusterSlotMap& slot_map) 
                                       << path << ": " << ec.message();
         std::filesystem::remove(tmp_path);
         return false;
+    }
+    const std::string parent_path = parent.empty() ? "." : parent.string();
+    if (!fsyncPath(parent_path, true)) {
+        MINIREDIS_LOG_WARN("cluster") << "failed to fsync cluster config directory: "
+                                      << parent_path;
     }
     return true;
 }
@@ -134,6 +161,7 @@ bool loadClusterConfig(const std::string& path, ClusterSlotMap& slot_map) {
     size_t node_count = 0;
     if (!(input >> tag >> snapshot.epoch) || tag != "epoch") return false;
     if (!(input >> tag >> node_count) || tag != "nodes") return false;
+    if (node_count == 0 || node_count > kMaxClusterNodes) return false;
 
     std::unordered_set<std::string> nodes;
     for (size_t i = 0; i < node_count; ++i) {
@@ -150,6 +178,7 @@ bool loadClusterConfig(const std::string& path, ClusterSlotMap& slot_map) {
 
     size_t range_count = 0;
     if (!(input >> tag >> range_count) || tag != "slots") return false;
+    if (range_count > kRedisClusterSlots) return false;
     for (size_t i = 0; i < range_count; ++i) {
         std::string slot_tag;
         int start = 0;
@@ -159,7 +188,9 @@ bool loadClusterConfig(const std::string& path, ClusterSlotMap& slot_map) {
         if (start < 0 || end < start || end >= kRedisClusterSlots) return false;
         if (nodes.find(owner) == nodes.end()) return false;
         for (int slot = start; slot <= end; ++slot) {
-            snapshot.slot_owner[static_cast<size_t>(slot)] = owner;
+            std::string& assigned_owner = snapshot.slot_owner[static_cast<size_t>(slot)];
+            if (!assigned_owner.empty()) return false;
+            assigned_owner = owner;
         }
     }
 
@@ -167,6 +198,8 @@ bool loadClusterConfig(const std::string& path, ClusterSlotMap& slot_map) {
     if (input >> tag) {
         if (tag != "slotstates") return false;
         if (!(input >> slot_state_count)) return false;
+        if (slot_state_count > kRedisClusterSlots) return false;
+        std::unordered_set<int> state_slots;
         for (size_t i = 0; i < slot_state_count; ++i) {
             std::string slot_state_tag;
             int slot = 0;
@@ -177,6 +210,7 @@ bool loadClusterConfig(const std::string& path, ClusterSlotMap& slot_map) {
                 return false;
             }
             if (slot < 0 || slot >= kRedisClusterSlots) return false;
+            if (!state_slots.insert(slot).second) return false;
             if (nodes.find(peer) == nodes.end()) return false;
             ClusterSlotState state = ClusterSlotState::Stable;
             if (!parseClusterSlotState(state_text, state) || state == ClusterSlotState::Stable) {
@@ -185,6 +219,9 @@ bool loadClusterConfig(const std::string& path, ClusterSlotMap& slot_map) {
             snapshot.slot_meta[static_cast<size_t>(slot)] = ClusterSlotMeta{state, peer};
         }
     }
+
+    std::string trailing;
+    if (input >> trailing) return false;
 
     if (!slot_map.LoadSnapshot(snapshot)) {
         MINIREDIS_LOG_ERROR("cluster") << "invalid cluster config content: " << path;

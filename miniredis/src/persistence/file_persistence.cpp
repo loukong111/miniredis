@@ -18,6 +18,7 @@ constexpr const char* kSnapshotMagicV1 = "MINIREDIS_SNAPSHOT_V1";
 constexpr const char* kSnapshotMagicV2 = "MINIREDIS_SNAPSHOT_V2";
 constexpr uint64_t kMaxEntrySize = 512ULL * 1024ULL * 1024ULL;
 constexpr uint64_t kMaxSnapshotEntries = 1'000'000ULL;
+constexpr uint64_t kMaxSnapshotBytes = 1024ULL * 1024ULL * 1024ULL;
 
 bool writeU64(std::ostream& os, uint64_t value) {
     os.write(reinterpret_cast<const char*>(&value), sizeof(value));
@@ -98,34 +99,59 @@ bool loadLegacyTextSnapshot(const std::string& path,
 
     std::string line;
     size_t count = 0;
+    SnapshotData loaded;
     while (std::getline(ifs, line)) {
         if (line.empty()) continue;
         size_t space = line.find(' ');
-        if (space == std::string::npos) {
-            MINIREDIS_LOG_WARN("snapshot") << "invalid legacy snapshot line: " << line;
-            continue;
+        if (space == std::string::npos || space == 0) {
+            MINIREDIS_LOG_ERROR("snapshot") << "invalid legacy snapshot line";
+            return false;
         }
-        out[line.substr(0, space)] = SnapshotEntry{line.substr(space + 1), 0};
+        const size_t key_size = space;
+        const size_t value_size = line.size() - space - 1;
+        if (key_size > kMaxEntrySize || value_size > kMaxEntrySize ||
+            count >= kMaxSnapshotEntries) {
+            MINIREDIS_LOG_ERROR("snapshot") << "legacy snapshot limit exceeded";
+            return false;
+        }
+        loaded[line.substr(0, space)] = SnapshotEntry{line.substr(space + 1), 0};
         ++count;
     }
+    if (ifs.bad()) return false;
+    out = std::move(loaded);
     MINIREDIS_LOG_INFO("snapshot") << "loaded legacy snapshot with " << count
                                    << " keys from " << path;
     return true;
 }
 
 bool loadSnapshotFile(const std::string& path, SnapshotData& out) {
+    std::error_code size_ec;
+    if (!std::filesystem::exists(path, size_ec)) {
+        return !size_ec;
+    }
+    const uintmax_t file_size = std::filesystem::file_size(path, size_ec);
+    if (size_ec || file_size == 0 || file_size > kMaxSnapshotBytes) {
+        MINIREDIS_LOG_ERROR("snapshot") << "invalid snapshot file size: " << path;
+        return false;
+    }
+
     std::ifstream ifs(path, std::ios::binary);
     if (!ifs) {
-        return true;
+        return false;
     }
 
     std::string magic;
     if (!std::getline(ifs, magic)) {
-        return true;
+        MINIREDIS_LOG_ERROR("snapshot") << "missing snapshot header: " << path;
+        return false;
     }
     const bool is_v1 = (magic == kSnapshotMagicV1);
     const bool is_v2 = (magic == kSnapshotMagicV2);
     if (!is_v1 && !is_v2) {
+        if (magic.rfind("MINIREDIS_SNAPSHOT_", 0) == 0) {
+            MINIREDIS_LOG_ERROR("snapshot") << "unsupported snapshot version: " << magic;
+            return false;
+        }
         ifs.close();
         return loadLegacyTextSnapshot(path, out);
     }
@@ -169,6 +195,10 @@ bool loadSnapshotFile(const std::string& path, SnapshotData& out) {
         }
         loaded[std::move(key)] = SnapshotEntry{std::move(value), expire_at_ms};
     }
+    if (ifs.peek() != std::char_traits<char>::eof()) {
+        MINIREDIS_LOG_ERROR("snapshot") << "unexpected trailing snapshot data: " << path;
+        return false;
+    }
 
     out = std::move(loaded);
     MINIREDIS_LOG_INFO("snapshot") << "loaded snapshot with " << out.size()
@@ -184,6 +214,23 @@ bool FilePersistence::saveSnapshot(const SnapshotData& data) {
     if (data.size() > kMaxSnapshotEntries) {
         MINIREDIS_LOG_ERROR("snapshot") << "snapshot has too many entries: " << data.size();
         return false;
+    }
+
+    uint64_t encoded_size = std::strlen(kSnapshotMagicV2) + 1 + sizeof(uint64_t);
+    for (const auto& [key, entry] : data) {
+        if (key.size() > kMaxEntrySize || entry.value.size() > kMaxEntrySize) {
+            MINIREDIS_LOG_ERROR("snapshot") << "snapshot entry exceeds size limit";
+            return false;
+        }
+        constexpr uint64_t kEntryHeaderBytes = sizeof(uint64_t) * 3;
+        const uint64_t payload_size = static_cast<uint64_t>(key.size()) +
+                                      static_cast<uint64_t>(entry.value.size());
+        if (payload_size > kMaxSnapshotBytes - kEntryHeaderBytes ||
+            encoded_size > kMaxSnapshotBytes - kEntryHeaderBytes - payload_size) {
+            MINIREDIS_LOG_ERROR("snapshot") << "snapshot exceeds total size limit";
+            return false;
+        }
+        encoded_size += kEntryHeaderBytes + payload_size;
     }
 
     const std::string tmp_path = filepath_ + ".tmp";
@@ -247,11 +294,14 @@ bool FilePersistence::saveSnapshot(const SnapshotData& data) {
 }
 
 bool FilePersistence::loadSnapshot(SnapshotData& out) {
-    if (loadSnapshotFile(filepath_, out)) {
-        return true;
+    std::error_code exists_ec;
+    const bool primary_exists = std::filesystem::exists(filepath_, exists_ec);
+    if (exists_ec) return false;
+    if (primary_exists) {
+        if (loadSnapshotFile(filepath_, out)) return true;
+        markBadSnapshot(filepath_);
     }
 
-    markBadSnapshot(filepath_);
     const std::string backup_path = backupSnapshotPath(filepath_);
     if (std::filesystem::exists(backup_path)) {
         MINIREDIS_LOG_WARN("snapshot") << "trying backup snapshot: " << backup_path;
@@ -260,7 +310,7 @@ bool FilePersistence::loadSnapshot(SnapshotData& out) {
         }
         markBadSnapshot(backup_path);
     }
-    return false;
+    return !primary_exists;
 }
 
 } // namespace miniredis

@@ -1,11 +1,9 @@
 #pragma once
 
 #include <mysql/mysql.h>
+#include <mutex>
 #include <string>
-#include <unordered_map>
 #include <vector>
-#include <memory>
-#include <stdexcept>
 
 namespace miniredis {
 
@@ -19,19 +17,14 @@ public:
     MySQLClient(const MySQLClient&) = delete;
     MySQLClient& operator=(const MySQLClient&) = delete;
 
-    bool loadAll(std::unordered_map<std::string, std::string>& out);
-    bool saveSnapshot(const std::unordered_map<std::string, std::string>& data);
-    bool ensureConnection();
-
-    // 在 public 部分添加
-    bool registerNode(const std::string& node_addr, int ttl_sec = 30);
+    bool registerNode(const std::string& node_addr);
     std::vector<std::string> getActiveNodes(int timeout_sec = 30);
     void unregisterNode(const std::string& node_addr);
 
 private:
     void connect();
     void disconnect();
-    bool executeQuery(const std::string& sql);
+    bool ensureConnection();
 
     mutable std::mutex mutex_;
     MYSQL* conn_;

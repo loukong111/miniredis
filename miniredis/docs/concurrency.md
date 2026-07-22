@@ -100,12 +100,13 @@ AOF append 由 `AppendOnlyFile::mutex_` 串行保护：
 - 命令数、连接数、延迟样本、内存指标
 - ready 状态
 - snapshot / AOF rewrite 状态
+- replication 在线副本、ACK offset、待追平量、重连和错误计数
 
 慢日志使用 mutex 保护 deque，节点地址使用 mutex 保护字符串。`/stats`、`/metrics` 和 `INFO` 读取的是运行时快照，允许轻微滞后，换取低开销。
 
 ## 当前边界
 
-- 当前复制支持启动全量同步、轻量 backlog 增量同步和后续异步转发，不提供完整 Redis PSYNC2、backlog 持久化和自动选主。
+- 当前复制将网络发送移出客户端线程，由每副本独立 worker 复用长连接并按 offset 追平；不提供完整 Redis PSYNC2、backlog 持久化和自动选主。
 - 手动 failover takeover 会更新本地 slot ownership，但不做多数派投票。
 - AOF rewrite 采用单进程后台线程实现，避免依赖 `fork`，更贴合当前 C++ 单进程架构。
 - HTTP stats server 是轻量监控入口，不适合作为高 QPS 业务接口。
@@ -125,6 +126,7 @@ ctest --test-dir build -R miniredis_unit_tests --output-on-failure
 
 ```bash
 scripts/recovery_soak.sh
+scripts/resource_failure_soak.sh
 scripts/benchmark.sh
 ```
 

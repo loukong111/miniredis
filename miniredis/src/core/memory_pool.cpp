@@ -2,6 +2,9 @@
 #include <cassert>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
+#include <memory>
+#include <new>
 
 namespace miniredis {
 
@@ -18,9 +21,15 @@ FixedMemoryPool::~FixedMemoryPool() {
 }
 
 void FixedMemoryPool::grow_unlocked(size_t num_blocks) {
+    if (num_blocks == 0) return;
+    if (num_blocks > std::numeric_limits<size_t>::max() / BLOCK_SIZE) {
+        throw std::bad_alloc();
+    }
     // 分配一大块内存: num_blocks * BLOCK_SIZE
-    char* chunk = new char[num_blocks * BLOCK_SIZE];
+    auto owner = std::make_unique<char[]>(num_blocks * BLOCK_SIZE);
+    char* chunk = owner.get();
     chunks_.push_back(chunk);
+    owner.release();
     
     // 将这块内存切分成Block，串成链表
     Block* prev = nullptr;
@@ -45,8 +54,13 @@ void* FixedMemoryPool::allocate() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (free_list_ == nullptr) {
         // 空闲不足，再扩展一批
-        grow_unlocked(64);
+        try {
+            grow_unlocked(64);
+        } catch (const std::bad_alloc&) {
+            return nullptr;
+        }
     }
+    if (free_list_ == nullptr) return nullptr;
     Block* block = free_list_;
     free_list_ = block->next;
     used_.fetch_add(1, std::memory_order_relaxed);

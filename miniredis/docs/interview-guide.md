@@ -151,7 +151,7 @@ fsync(parent dir)
 
 - 没有完整 Redis Cluster gossip。
 - 没有多数派投票和自动选主。
-- 没有完整 PSYNC2、replication offset 多副本比较和复制积压缓冲持久化。
+- 没有完整 PSYNC2、replication ID 切换、复制积压缓冲持久化和自动选主。
 - slot 迁移是简化同步实现，不提供完整回滚。
 
 这不是扣分，反而说明你知道边界。
@@ -160,9 +160,10 @@ fsync(parent dir)
 
 回答思路：
 
-- replica 启动时先带本地 offset 请求 `REPLPSYNC`，backlog 命中时只拉取缺失写命令。
+- replica 启动及运行期间带本地 offset 请求 `REPLPSYNC`，backlog 命中时只拉取缺失写命令。
 - backlog 不足时退回 `REPLFULLSYNC` 做全量同步。
-- master 成功执行 `SET/SETNX/APPEND/INCR/DEL/GETDEL/GETEX/EXPIRE/PEXPIRE/PERSIST` 后写入 replication backlog，并通过 `REPLAPPLY <offset> ...` 转发内部复制命令。
+- master 写入成功后只追加 backlog 并通知后台 worker，客户端线程不等待副本网络；每个副本使用独立长连接按 offset 发送并读取 ACK。
+- replica 对重复 offset 幂等应答，对不连续 offset 返回 `REPLGAP`，周期同步负责断线追平。
 - replica 普通写请求返回 `READONLY`。
 - replica 启动全量同步后会触发本地 AOF rewrite，压缩本地日志。
 
@@ -205,7 +206,7 @@ fsync(parent dir)
 
 - 补 Redis 基线压测，对比 MiniRedis 和 Redis 在相同机器上的 QPS/延迟差异。
 - 增加 TSAN 网络集成测试，验证多客户端、snapshot、AOF rewrite 并发场景。
-- 完善 replication backlog：增加持久化 backlog、offset 校验和更完整的 PSYNC2 兼容。
+- 完善 replication：增加 replication ID、backlog 持久化和更完整的 PSYNC2 兼容。
 - 完善 failover：基于 epoch、offset 和多数派确认做自动选主。
 - 增加更多数据结构，例如 hash/list，但优先级低于稳定性和可观测性。
 - 引入 TLS 或和网关集成，增强公网部署安全性。

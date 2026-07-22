@@ -8,7 +8,8 @@ namespace {
 
 uint16_t crc16(std::string_view data) {
     uint16_t crc = 0;
-    for (unsigned char byte : data) {
+    for (char raw_byte : data) {
+        const auto byte = static_cast<unsigned char>(raw_byte);
         crc ^= static_cast<uint16_t>(byte) << 8;
         for (int i = 0; i < 8; ++i) {
             if (crc & 0x8000) {

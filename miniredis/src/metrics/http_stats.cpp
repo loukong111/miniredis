@@ -132,7 +132,7 @@ void start_stats_http_server(const std::string& bind_addr, int port, std::atomic
     setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
     struct sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
+    addr.sin_port = htons(static_cast<uint16_t>(port));
     if (inet_pton(AF_INET, bind_addr.c_str(), &addr.sin_addr) != 1) {
         MINIREDIS_LOG_ERROR("stats") << "invalid stats bind address: " << bind_addr;
         close(server_fd);

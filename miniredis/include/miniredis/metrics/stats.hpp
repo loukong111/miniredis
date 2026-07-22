@@ -53,6 +53,14 @@ struct StatsSnapshot {
     size_t aof_rewrite_failures = 0;
     std::string aof_rewrite_last_status;
     std::string aof_rewrite_last_error;
+    size_t replication_configured_replicas = 0;
+    size_t replication_connected_replicas = 0;
+    uint64_t replication_master_offset = 0;
+    uint64_t replication_min_ack_offset = 0;
+    uint64_t replication_pending_offsets = 0;
+    uint64_t replication_reconnects = 0;
+    uint64_t replication_errors = 0;
+    uint64_t replication_backlog_misses = 0;
     uint64_t uptime_seconds = 0;
     bool ready = false;
     size_t io_threads = 0;
@@ -103,6 +111,10 @@ public:
     void setAofRewriteBufferBytes(size_t bytes);
     void recordAofRewriteResult(bool ok, size_t records, size_t duration_ms);
     void setAofRewriteStatus(const std::string& status, const std::string& error = {});
+    void setReplicationState(size_t configured_replicas, size_t connected_replicas,
+                             uint64_t master_offset, uint64_t minimum_ack_offset,
+                             uint64_t pending_offsets, uint64_t reconnects,
+                             uint64_t errors, uint64_t backlog_misses);
     size_t totalCommands() const { return total_commands_.load(std::memory_order_relaxed); }
     size_t connectedClients() const { return connected_clients_.load(std::memory_order_relaxed); }
 
@@ -154,6 +166,14 @@ private:
     std::string aof_rewrite_last_status_;
     std::string aof_rewrite_last_error_;
     mutable std::mutex aof_rewrite_status_mutex_;
+    std::atomic<size_t> replication_configured_replicas_{0};
+    std::atomic<size_t> replication_connected_replicas_{0};
+    std::atomic<uint64_t> replication_master_offset_{0};
+    std::atomic<uint64_t> replication_min_ack_offset_{0};
+    std::atomic<uint64_t> replication_pending_offsets_{0};
+    std::atomic<uint64_t> replication_reconnects_{0};
+    std::atomic<uint64_t> replication_errors_{0};
+    std::atomic<uint64_t> replication_backlog_misses_{0};
     std::atomic<bool> ready_{false};
     std::atomic<size_t> io_threads_{0};
     std::atomic<uint64_t> next_slowlog_id_{0};

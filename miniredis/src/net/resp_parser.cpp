@@ -1,10 +1,23 @@
 #include "miniredis/net/resp_parser.hpp"
-#include <cctype>
 #include <charconv>
-#include <iostream>
-#include <sstream>
+#include <limits>
 
 namespace miniredis {
+namespace {
+
+constexpr size_t kMaxHeaderBytes = 1024;
+constexpr size_t kMaxNestingDepth = 64;
+constexpr long long kMaxBulkStringBytes = 512LL * 1024LL * 1024LL;
+constexpr long long kMaxArrayElements = 1'000'000LL;
+
+bool parseIntegerStrict(std::string_view text, long long& value) {
+    if (text.empty()) return false;
+    const char* end = text.data() + text.size();
+    auto [ptr, ec] = std::from_chars(text.data(), end, value);
+    return ec == std::errc() && ptr == end;
+}
+
+} // namespace
 
 // ---------- Decoder ----------
 
@@ -14,12 +27,14 @@ void RespDecoder::feed(std::string_view data) {
 
 void RespDecoder::reset() {
     buffer_.clear();
+    protocol_error_ = false;
+    protocol_error_message_.clear();
 }
 
 std::optional<RespValue> RespDecoder::parse() {
-    if (buffer_.empty()) return std::nullopt;
+    if (buffer_.empty() || protocol_error_) return std::nullopt;
     size_t pos = 0;
-    auto result = parseValue(buffer_, pos);
+    auto result = parseValue(buffer_, pos, 0);
     if (result && pos <= buffer_.size()) {
         // 成功解析一个完整值，移除已解析部分
         buffer_.erase(0, pos);
@@ -28,22 +43,51 @@ std::optional<RespValue> RespDecoder::parse() {
     return std::nullopt;
 }
 
-std::optional<RespValue> RespDecoder::parseValue(const std::string& data, size_t& pos) {
+std::optional<size_t> RespDecoder::findLineEnd(const std::string& data, size_t pos) {
+    size_t end = data.find("\r\n", pos);
+    if (end == std::string::npos) {
+        if (data.size() - pos > kMaxHeaderBytes) {
+            setProtocolError("RESP header exceeds limit");
+        }
+        return std::nullopt;
+    }
+    if (end - pos > kMaxHeaderBytes) {
+        setProtocolError("RESP header exceeds limit");
+        return std::nullopt;
+    }
+    return end;
+}
+
+void RespDecoder::setProtocolError(std::string message) {
+    if (protocol_error_) return;
+    protocol_error_ = true;
+    protocol_error_message_ = std::move(message);
+}
+
+std::optional<RespValue> RespDecoder::parseValue(const std::string& data, size_t& pos,
+                                                 size_t depth) {
     if (pos >= data.size()) return std::nullopt;
+    if (depth > kMaxNestingDepth) {
+        setProtocolError("RESP nesting depth exceeds limit");
+        return std::nullopt;
+    }
     char c = data[pos];
     switch (c) {
         case '+': return parseSimpleString(data, pos);
         case '-': return parseError(data, pos);
         case ':': return parseInteger(data, pos);
         case '$': return parseBulkString(data, pos);
-        case '*': return parseArray(data, pos);
-        default: return std::nullopt;
+        case '*': return parseArray(data, pos, depth);
+        default:
+            setProtocolError("unknown RESP type byte");
+            return std::nullopt;
     }
 }
 
 std::optional<RespValue> RespDecoder::parseSimpleString(const std::string& data, size_t& pos) {
-    size_t end = data.find("\r\n", pos);
-    if (end == std::string::npos) return std::nullopt;
+    auto end_value = findLineEnd(data, pos);
+    if (!end_value) return std::nullopt;
+    size_t end = *end_value;
     RespValue val;
     val.type = RespType::SIMPLE_STRING;
     val.str = data.substr(pos + 1, end - pos - 1);
@@ -52,8 +96,9 @@ std::optional<RespValue> RespDecoder::parseSimpleString(const std::string& data,
 }//+OK\r\n
 
 std::optional<RespValue> RespDecoder::parseError(const std::string& data, size_t& pos) {
-    size_t end = data.find("\r\n", pos);
-    if (end == std::string::npos) return std::nullopt;
+    auto end_value = findLineEnd(data, pos);
+    if (!end_value) return std::nullopt;
+    size_t end = *end_value;
     RespValue val;
     val.type = RespType::ERROR;
     val.str = data.substr(pos + 1, end - pos - 1);
@@ -62,12 +107,15 @@ std::optional<RespValue> RespDecoder::parseError(const std::string& data, size_t
 }//-ERR xxx\r\n
 
 std::optional<RespValue> RespDecoder::parseInteger(const std::string& data, size_t& pos) {
-    size_t end = data.find("\r\n", pos);
-    if (end == std::string::npos) return std::nullopt;
+    auto end_value = findLineEnd(data, pos);
+    if (!end_value) return std::nullopt;
+    size_t end = *end_value;
     std::string_view numStr(data.data() + pos + 1, end - pos - 1);
     long long n = 0;
-    auto [ptr, ec] = std::from_chars(numStr.data(), numStr.data() + numStr.size(), n);
-    if (ec != std::errc()) return std::nullopt;
+    if (!parseIntegerStrict(numStr, n)) {
+        setProtocolError("invalid RESP integer");
+        return std::nullopt;
+    }
     RespValue val;
     val.type = RespType::INTEGER;
     val.integer = n;
@@ -76,12 +124,15 @@ std::optional<RespValue> RespDecoder::parseInteger(const std::string& data, size
 }//123\r\n
 
 std::optional<RespValue> RespDecoder::parseBulkString(const std::string& data, size_t& pos) {
-    size_t lenEnd = data.find("\r\n", pos);
-    if (lenEnd == std::string::npos) return std::nullopt;
+    auto len_end_value = findLineEnd(data, pos);
+    if (!len_end_value) return std::nullopt;
+    size_t lenEnd = *len_end_value;
     long long len = 0;
     std::string_view lenStr(data.data() + pos + 1, lenEnd - pos - 1);
-    auto [ptr, ec] = std::from_chars(lenStr.data(), lenStr.data() + lenStr.size(), len);
-    if (ec != std::errc()) return std::nullopt;
+    if (!parseIntegerStrict(lenStr, len)) {
+        setProtocolError("invalid RESP bulk length");
+        return std::nullopt;
+    }
     if (len == -1) {
         RespValue val;
         val.type = RespType::BULK_STRING;
@@ -89,26 +140,45 @@ std::optional<RespValue> RespDecoder::parseBulkString(const std::string& data, s
         pos = lenEnd + 2;
         return val;
     }
+    if (len < 0 || len > kMaxBulkStringBytes) {
+        setProtocolError("RESP bulk length out of range");
+        return std::nullopt;
+    }
     size_t dataStart = lenEnd + 2;
-    if (data.size() < dataStart + len + 2) return std::nullopt;
+    const size_t value_size = static_cast<size_t>(len);
+    if (value_size > std::numeric_limits<size_t>::max() - dataStart - 2) {
+        setProtocolError("RESP bulk length overflow");
+        return std::nullopt;
+    }
+    const size_t frame_end = dataStart + value_size + 2;
+    if (data.size() < frame_end) return std::nullopt;
+    if (data[dataStart + value_size] != '\r' || data[dataStart + value_size + 1] != '\n') {
+        setProtocolError("invalid RESP bulk terminator");
+        return std::nullopt;
+    }
     RespValue val;
     val.type = RespType::BULK_STRING;
-    val.str = data.substr(dataStart, len);
-    pos = dataStart + len + 2;
+    val.str = data.substr(dataStart, value_size);
+    pos = frame_end;
     return val;
 }//$4\r\njack\r\n
 
-std::optional<RespValue> RespDecoder::parseArray(const std::string& data, size_t& pos) {
-    size_t lenEnd = data.find("\r\n", pos);
-    if (lenEnd == std::string::npos) return std::nullopt;
+std::optional<RespValue> RespDecoder::parseArray(const std::string& data, size_t& pos,
+                                                 size_t depth) {
+    auto len_end_value = findLineEnd(data, pos);
+    if (!len_end_value) return std::nullopt;
+    size_t lenEnd = *len_end_value;
     long long numElements = 0;
     std::string_view lenStr(data.data() + pos + 1, lenEnd - pos - 1);
-    auto [ptr, ec] = std::from_chars(lenStr.data(), lenStr.data() + lenStr.size(), numElements);
-    if (ec != std::errc() || numElements < 0) return std::nullopt;
+    if (!parseIntegerStrict(lenStr, numElements) || numElements < 0 ||
+        numElements > kMaxArrayElements) {
+        setProtocolError("RESP array length out of range");
+        return std::nullopt;
+    }
     pos = lenEnd + 2;
     std::vector<RespValue> elements;
     for (long long i = 0; i < numElements; ++i) {
-        auto elem = parseValue(data, pos);
+        auto elem = parseValue(data, pos, depth + 1);
         if (!elem) return std::nullopt;
         elements.push_back(std::move(*elem));
     }

@@ -15,6 +15,8 @@
 
 namespace miniredis {
 
+class ReplicationDispatcher;
+
 struct CommandSession {
     bool authenticated = false;
     bool asking = false;
@@ -36,7 +38,10 @@ public:
                    std::function<void()> cluster_change_callback = {},
                    ReplicationBacklog* replication_backlog = nullptr,
                    std::atomic<uint64_t>* replication_offset = nullptr,
-                   std::function<void(uint64_t)> replication_offset_callback = {});
+                   std::function<void(uint64_t)> replication_offset_callback = {},
+                   ReplicationDispatcher* replication_dispatcher = nullptr,
+                   std::mutex* replication_apply_mutex = nullptr,
+                   std::function<void()> replica_promoted_callback = {});
 
     std::string handle(const RespValue& cmd, CommandSession& session);
     std::string handle(const RespValue& cmd, bool& authenticated);
@@ -52,7 +57,7 @@ private:
     std::string validateValue(const RespValue& value) const;
     std::string handleAclCommand(const RespValue& cmd, const CommandSession& session) const;
     std::string routeIfNeeded(const std::string& cmd_name, const RespValue& cmd,
-                              CommandSession& session) const;
+                              bool asking) const;
     std::string handleInfoCommand(const RespValue& cmd) const;
     std::string handleSlowLogCommand(const RespValue& cmd) const;
     std::string handleClusterCommand(const RespValue& cmd);
@@ -75,6 +80,9 @@ private:
     ReplicationBacklog* replication_backlog_;
     std::atomic<uint64_t>* replication_offset_;
     std::function<void(uint64_t)> replication_offset_callback_;
+    ReplicationDispatcher* replication_dispatcher_;
+    std::mutex* replication_apply_mutex_;
+    std::function<void()> replica_promoted_callback_;
     bool promoted_to_master_ = false;
 };
 

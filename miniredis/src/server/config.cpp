@@ -1,10 +1,12 @@
 #include "miniredis/server/config.hpp"
 #include <algorithm>
 #include <cctype>
+#include <charconv>
 #include <cstdlib>
 #include <fstream>
 #include <getopt.h>
 #include <iostream>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 
@@ -23,24 +25,37 @@ std::string getEnvOr(const char* name, const std::string& fallback) {
     return value ? std::string(value) : fallback;
 }
 
+int parseIntStrict(const std::string& value, const char* name) {
+    int parsed = 0;
+    const char* end = value.data() + value.size();
+    auto [ptr, ec] = std::from_chars(value.data(), end, parsed);
+    if (value.empty() || ec != std::errc() || ptr != end) {
+        throw std::invalid_argument(std::string("invalid integer for ") + name + ": " + value);
+    }
+    return parsed;
+}
+
+size_t parseSizeStrict(const std::string& value, const char* name) {
+    unsigned long long parsed = 0;
+    const char* end = value.data() + value.size();
+    auto [ptr, ec] = std::from_chars(value.data(), end, parsed);
+    if (value.empty() || ec != std::errc() || ptr != end ||
+        parsed > std::numeric_limits<size_t>::max()) {
+        throw std::invalid_argument(std::string("invalid size for ") + name + ": " + value);
+    }
+    return static_cast<size_t>(parsed);
+}
+
 int getEnvIntOr(const char* name, int fallback) {
     const char* value = std::getenv(name);
     if (!value) return fallback;
-    try {
-        return std::stoi(value);
-    } catch (...) {
-        return fallback;
-    }
+    return parseIntStrict(value, name);
 }
 
 size_t getEnvSizeOr(const char* name, size_t fallback) {
     const char* value = std::getenv(name);
     if (!value) return fallback;
-    try {
-        return static_cast<size_t>(std::stoull(value));
-    } catch (...) {
-        return fallback;
-    }
+    return parseSizeStrict(value, name);
 }
 
 std::string trim(const std::string& value) {
@@ -90,6 +105,12 @@ bool parseBool(const std::string& value) {
         return false;
     }
     throw std::invalid_argument("invalid boolean value: " + value);
+}
+
+bool isLoopbackBindAddress(const std::string& value) {
+    std::string addr = toLower(trim(value));
+    if (addr == "localhost") return true;
+    return addr == "127.0.0.1" || addr.rfind("127.", 0) == 0;
 }
 
 std::vector<std::string> splitList(const std::string& value, char delimiter) {
@@ -260,35 +281,38 @@ void applyConfigValue(AppConfig& config, const std::string& raw_key, const std::
     if (key == "bind" || key == "bind_addr") config.bind_addr = value;
     else if (key == "log_file") config.log_file = value;
     else if (key == "log_level") config.log_level = value;
-    else if (key == "port") config.port = std::stoi(value);
+    else if (key == "port") config.port = parseIntStrict(value, "port");
     else if (key == "stats_bind" || key == "stats_bind_addr") config.stats_bind_addr = value;
-    else if (key == "stats_port") config.stats_port = std::stoi(value);
+    else if (key == "stats_port") config.stats_port = parseIntStrict(value, "stats_port");
     else if (key == "snapshot_file") config.snapshot_file = value;
-    else if (key == "snapshot_interval" || key == "snapshot_interval_sec") config.snapshot_interval_sec = std::stoi(value);
+    else if (key == "snapshot_interval" || key == "snapshot_interval_sec") config.snapshot_interval_sec = parseIntStrict(value, "snapshot_interval");
     else if (key == "appendonly_file" || key == "aof_file") config.appendonly_file = value;
     else if (key == "appendfsync") config.appendfsync = value;
     else if (key == "replicaof") config.replicaof = value;
     else if (key == "replicas" || key == "replicas_str") config.replicas_str = value;
+    else if (key == "replication_backlog_size" || key == "repl_backlog_size") config.replication_backlog_size = parseSizeStrict(value, "replication_backlog_size");
+    else if (key == "replication_sync_interval_ms") config.replication_sync_interval_ms = parseSizeStrict(value, "replication_sync_interval_ms");
+    else if (key == "replication_reconnect_delay_ms") config.replication_reconnect_delay_ms = parseSizeStrict(value, "replication_reconnect_delay_ms");
     else if (key == "requirepass") config.requirepass = value;
     else if (key == "acl_user" || key == "user") config.acl_users.push_back(parseAclUser(value));
     else if (key == "acl_users") parseAclUsersList(config, value);
-    else if (key == "max_request_bytes") config.max_request_bytes = static_cast<size_t>(std::stoull(value));
-    else if (key == "max_key_bytes") config.max_key_bytes = static_cast<size_t>(std::stoull(value));
-    else if (key == "max_value_bytes") config.max_value_bytes = static_cast<size_t>(std::stoull(value));
-    else if (key == "max_pipeline_commands") config.max_pipeline_commands = static_cast<size_t>(std::stoull(value));
-    else if (key == "client_output_buffer_limit") config.client_output_buffer_limit = static_cast<size_t>(std::stoull(value));
-    else if (key == "max_clients") config.max_clients = static_cast<size_t>(std::stoull(value));
-    else if (key == "io_threads") config.io_threads = static_cast<size_t>(std::stoull(value));
-    else if (key == "cache_shards") config.cache_shards = static_cast<size_t>(std::stoull(value));
-    else if (key == "maxmemory" || key == "maxmemory_bytes") config.maxmemory_bytes = static_cast<size_t>(std::stoull(value));
+    else if (key == "max_request_bytes") config.max_request_bytes = parseSizeStrict(value, "max_request_bytes");
+    else if (key == "max_key_bytes") config.max_key_bytes = parseSizeStrict(value, "max_key_bytes");
+    else if (key == "max_value_bytes") config.max_value_bytes = parseSizeStrict(value, "max_value_bytes");
+    else if (key == "max_pipeline_commands") config.max_pipeline_commands = parseSizeStrict(value, "max_pipeline_commands");
+    else if (key == "client_output_buffer_limit") config.client_output_buffer_limit = parseSizeStrict(value, "client_output_buffer_limit");
+    else if (key == "max_clients") config.max_clients = parseSizeStrict(value, "max_clients");
+    else if (key == "io_threads") config.io_threads = parseSizeStrict(value, "io_threads");
+    else if (key == "cache_shards") config.cache_shards = parseSizeStrict(value, "cache_shards");
+    else if (key == "maxmemory" || key == "maxmemory_bytes") config.maxmemory_bytes = parseSizeStrict(value, "maxmemory");
     else if (key == "eviction_policy") config.eviction_policy = value;
-    else if (key == "slowlog_log_slower_than_us") config.slowlog_log_slower_than_us = static_cast<size_t>(std::stoull(value));
-    else if (key == "slowlog_max_len") config.slowlog_max_len = static_cast<size_t>(std::stoull(value));
+    else if (key == "slowlog_log_slower_than_us") config.slowlog_log_slower_than_us = parseSizeStrict(value, "slowlog_log_slower_than_us");
+    else if (key == "slowlog_max_len") config.slowlog_max_len = parseSizeStrict(value, "slowlog_max_len");
     else if (key == "cluster" || key == "cluster_mode") config.cluster_mode = parseBool(value);
     else if (key == "enable_node_discovery") config.enable_node_discovery = parseBool(value);
     else if (key == "cluster_heartbeat" || key == "cluster_heartbeat_interval" || key == "cluster_heartbeat_interval_sec") {
-        config.cluster_heartbeat_interval_sec = std::stoi(value);
-    } else if (key == "cluster_fail_threshold") config.cluster_fail_threshold = std::stoi(value);
+        config.cluster_heartbeat_interval_sec = parseIntStrict(value, "cluster_heartbeat");
+    } else if (key == "cluster_fail_threshold") config.cluster_fail_threshold = parseIntStrict(value, "cluster_fail_threshold");
     else if (key == "cluster_config_file") config.cluster_config_file = value;
     else if (key == "node_addr") config.node_addr = value;
     else if (key == "nodes" || key == "nodes_str") config.nodes_str = value;
@@ -296,7 +320,7 @@ void applyConfigValue(AppConfig& config, const std::string& raw_key, const std::
     else if (key == "mysql_user") config.mysql_user = value;
     else if (key == "mysql_pass") config.mysql_pass = value;
     else if (key == "mysql_db") config.mysql_db = value;
-    else if (key == "mysql_port") config.mysql_port = std::stoi(value);
+    else if (key == "mysql_port") config.mysql_port = parseIntStrict(value, "mysql_port");
     else throw std::invalid_argument("unknown config key: " + raw_key);
 }
 
@@ -350,6 +374,9 @@ void loadEnvironment(AppConfig& config) {
     config.appendfsync = getEnvOr("MINIREDIS_APPENDFSYNC", config.appendfsync);
     config.replicaof = getEnvOr("MINIREDIS_REPLICAOF", config.replicaof);
     config.replicas_str = getEnvOr("MINIREDIS_REPLICAS", config.replicas_str);
+    config.replication_backlog_size = getEnvSizeOr("MINIREDIS_REPLICATION_BACKLOG_SIZE", config.replication_backlog_size);
+    config.replication_sync_interval_ms = getEnvSizeOr("MINIREDIS_REPLICATION_SYNC_INTERVAL_MS", config.replication_sync_interval_ms);
+    config.replication_reconnect_delay_ms = getEnvSizeOr("MINIREDIS_REPLICATION_RECONNECT_DELAY_MS", config.replication_reconnect_delay_ms);
     config.requirepass = getEnvOr("MINIREDIS_REQUIREPASS", config.requirepass);
     const char* acl_users = std::getenv("MINIREDIS_ACL_USERS");
     if (acl_users) {
@@ -406,10 +433,10 @@ std::string aclRoleName(AclRole role) {
 }
 
 bool parseNodePort(const std::string& addr, int& port) {
-    size_t colon = addr.find(':');
-    if (colon == std::string::npos) return false;
+    size_t colon = addr.rfind(':');
+    if (colon == std::string::npos || colon == 0 || colon + 1 >= addr.size()) return false;
     try {
-        port = std::stoi(addr.substr(colon + 1));
+        port = parseIntStrict(addr.substr(colon + 1), "node port");
     } catch (...) {
         return false;
     }
@@ -432,6 +459,9 @@ void printUsage(const char* program) {
         << "  --appendfsync policy      no, everysec, or always (default: everysec)\n"
         << "  --replicaof ip:port       Run as a read-only replica of this master\n"
         << "  --replicas a:port,b:port  Master-side replicas to forward write commands\n"
+        << "  --replication-backlog-size count  Maximum incremental replication entries (default: 10000)\n"
+        << "  --replication-sync-interval-ms ms  Replica pull catch-up interval (default: 1000)\n"
+        << "  --replication-reconnect-delay-ms ms  Master push reconnect delay (default: 500)\n"
         << "  --requirepass password    Enable AUTH with this password\n"
         << "  --acl-user spec           Add ACL user. Old: user:pass:role. New: user password=pass role=readwrite commands=get,set keys=app:* enabled=true\n"
         << "  --max-request-bytes bytes Maximum buffered request bytes per client (default: 16777216)\n"
@@ -493,6 +523,9 @@ ConfigParseResult parseConfig(int argc, char* argv[], AppConfig& config) {
         {"appendfsync",       required_argument, 0, 1021},
         {"replicaof",         required_argument, 0, 1023},
         {"replicas",          required_argument, 0, 1024},
+        {"replication-backlog-size", required_argument, 0, 1031},
+        {"replication-sync-interval-ms", required_argument, 0, 1032},
+        {"replication-reconnect-delay-ms", required_argument, 0, 1033},
         {"requirepass",       required_argument, 0, 'r'},
         {"acl-user",          required_argument, 0, 1025},
         {"max-request-bytes",  required_argument, 0, 1026},
@@ -523,43 +556,46 @@ ConfigParseResult parseConfig(int argc, char* argv[], AppConfig& config) {
             switch (opt) {
                 case 'c': config.cluster_mode = true; break;
                 case 1007: config.enable_node_discovery = true; break;
-                case 1009: config.cluster_heartbeat_interval_sec = std::stoi(optarg); break;
-                case 1010: config.cluster_fail_threshold = std::stoi(optarg); break;
+                case 1009: config.cluster_heartbeat_interval_sec = parseIntStrict(optarg, "cluster-heartbeat"); break;
+                case 1010: config.cluster_fail_threshold = parseIntStrict(optarg, "cluster-fail-threshold"); break;
                 case 1022: config.cluster_config_file = optarg; break;
                 case 'a': config.node_addr = optarg; break;
                 case 'n': config.nodes_str = optarg; break;
                 case 'b': config.bind_addr = optarg; break;
-                case 'p': config.port = std::stoi(optarg); break;
+                case 'p': config.port = parseIntStrict(optarg, "port"); break;
                 case 's': config.snapshot_file = optarg; break;
-                case 'i': config.snapshot_interval_sec = std::stoi(optarg); break;
+                case 'i': config.snapshot_interval_sec = parseIntStrict(optarg, "snapshot-interval"); break;
                 case 1020: config.appendonly_file = optarg; break;
                 case 1021: config.appendfsync = optarg; break;
                 case 1023: config.replicaof = optarg; break;
                 case 1024: config.replicas_str = optarg; break;
+                case 1031: config.replication_backlog_size = parseSizeStrict(optarg, "replication-backlog-size"); break;
+                case 1032: config.replication_sync_interval_ms = parseSizeStrict(optarg, "replication-sync-interval-ms"); break;
+                case 1033: config.replication_reconnect_delay_ms = parseSizeStrict(optarg, "replication-reconnect-delay-ms"); break;
                 case 'r': config.requirepass = optarg; break;
                 case 1025: config.acl_users.push_back(parseAclUser(optarg)); break;
-                case 1026: config.max_request_bytes = static_cast<size_t>(std::stoull(optarg)); break;
-                case 1027: config.max_key_bytes = static_cast<size_t>(std::stoull(optarg)); break;
-                case 1028: config.max_value_bytes = static_cast<size_t>(std::stoull(optarg)); break;
-                case 1029: config.max_pipeline_commands = static_cast<size_t>(std::stoull(optarg)); break;
-                case 1030: config.client_output_buffer_limit = static_cast<size_t>(std::stoull(optarg)); break;
-                case 1008: config.max_clients = static_cast<size_t>(std::stoull(optarg)); break;
-                case 1019: config.io_threads = static_cast<size_t>(std::stoull(optarg)); break;
-                case 1018: config.cache_shards = static_cast<size_t>(std::stoull(optarg)); break;
-                case 1011: config.maxmemory_bytes = static_cast<size_t>(std::stoull(optarg)); break;
+                case 1026: config.max_request_bytes = parseSizeStrict(optarg, "max-request-bytes"); break;
+                case 1027: config.max_key_bytes = parseSizeStrict(optarg, "max-key-bytes"); break;
+                case 1028: config.max_value_bytes = parseSizeStrict(optarg, "max-value-bytes"); break;
+                case 1029: config.max_pipeline_commands = parseSizeStrict(optarg, "max-pipeline-commands"); break;
+                case 1030: config.client_output_buffer_limit = parseSizeStrict(optarg, "client-output-buffer-limit"); break;
+                case 1008: config.max_clients = parseSizeStrict(optarg, "max-clients"); break;
+                case 1019: config.io_threads = parseSizeStrict(optarg, "io-threads"); break;
+                case 1018: config.cache_shards = parseSizeStrict(optarg, "cache-shards"); break;
+                case 1011: config.maxmemory_bytes = parseSizeStrict(optarg, "maxmemory"); break;
                 case 1012: config.eviction_policy = optarg; break;
-                case 1013: config.slowlog_log_slower_than_us = static_cast<size_t>(std::stoull(optarg)); break;
-                case 1014: config.slowlog_max_len = static_cast<size_t>(std::stoull(optarg)); break;
+                case 1013: config.slowlog_log_slower_than_us = parseSizeStrict(optarg, "slowlog-log-slower-than-us"); break;
+                case 1014: config.slowlog_max_len = parseSizeStrict(optarg, "slowlog-max-len"); break;
                 case 1015: config.config_file = optarg; break;
                 case 1016: config.log_file = optarg; break;
                 case 1017: config.log_level = optarg; break;
                 case 1000: config.stats_bind_addr = optarg; break;
-                case 1001: config.stats_port = std::stoi(optarg); break;
+                case 1001: config.stats_port = parseIntStrict(optarg, "stats-port"); break;
                 case 1002: config.mysql_host = optarg; break;
                 case 1003: config.mysql_user = optarg; break;
                 case 1004: config.mysql_pass = optarg; break;
                 case 1005: config.mysql_db = optarg; break;
-                case 1006: config.mysql_port = std::stoi(optarg); break;
+                case 1006: config.mysql_port = parseIntStrict(optarg, "mysql-port"); break;
                 case 'h':
                     printUsage(argv[0]);
                     return ConfigParseResult::Help;
@@ -585,6 +621,15 @@ ConfigParseResult parseConfig(int argc, char* argv[], AppConfig& config) {
     }
     if (config.max_clients == 0) {
         std::cerr << "max clients must be positive" << std::endl;
+        return ConfigParseResult::Error;
+    }
+    if (config.replication_backlog_size == 0 ||
+        config.replication_sync_interval_ms < 50 ||
+        config.replication_sync_interval_ms > 60000 ||
+        config.replication_reconnect_delay_ms < 50 ||
+        config.replication_reconnect_delay_ms > 60000) {
+        std::cerr << "replication backlog must be positive and replication intervals must be in range 50..60000 ms"
+                  << std::endl;
         return ConfigParseResult::Error;
     }
     if (config.max_request_bytes == 0 || config.max_key_bytes == 0 ||
@@ -618,6 +663,12 @@ ConfigParseResult parseConfig(int argc, char* argv[], AppConfig& config) {
     }
     if (config.cluster_heartbeat_interval_sec <= 0 || config.cluster_fail_threshold <= 0) {
         std::cerr << "cluster heartbeat and fail threshold must be positive" << std::endl;
+        return ConfigParseResult::Error;
+    }
+    if (!isLoopbackBindAddress(config.bind_addr) &&
+        config.requirepass.empty() && config.acl_users.empty()) {
+        std::cerr << "RESP bind address is not loopback; configure requirepass or ACL users"
+                  << std::endl;
         return ConfigParseResult::Error;
     }
     for (size_t i = 0; i < config.acl_users.size(); ++i) {

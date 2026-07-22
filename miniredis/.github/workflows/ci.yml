@@ -39,6 +39,9 @@ jobs:
       - name: Recovery / soak smoke
         run: REQUESTS=1000 CLIENTS=5 scripts/recovery_soak.sh
 
+      - name: Resource / failure smoke
+        run: REQUESTS=1000 CLIENTS=5 scripts/resource_failure_soak.sh
+
   sanitizer-test:
     runs-on: ubuntu-24.04
 

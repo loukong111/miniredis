@@ -1,8 +1,19 @@
 #include "miniredis/core/logger.hpp"
 #include "miniredis/cluster/mysql_client.hpp"
-#include <sstream>
+#include <stdexcept>
+#include <vector>
 
 namespace miniredis {
+namespace {
+
+std::string escapeSqlString(MYSQL* connection, const std::string& value) {
+    std::vector<char> escaped(value.size() * 2 + 1);
+    const unsigned long size = mysql_real_escape_string(
+        connection, escaped.data(), value.data(), static_cast<unsigned long>(value.size()));
+    return std::string(escaped.data(), size);
+}
+
+} // namespace
 
 MySQLClient::MySQLClient(const std::string& host, const std::string& user,
                          const std::string& pass, const std::string& db,
@@ -53,69 +64,12 @@ bool MySQLClient::ensureConnection() {
     }
 }
 
-bool MySQLClient::executeQuery(const std::string& sql) {
-    if (!ensureConnection()) return false;
-    if (mysql_query(conn_, sql.c_str())) {
-        MINIREDIS_LOG_ERROR("mysql") << "query error: " << mysql_error(conn_) << " SQL: " << sql;
-        return false;
-    }
-    return true;
-}
-
-bool MySQLClient::loadAll(std::unordered_map<std::string, std::string>& out) {
-    if (!ensureConnection()) return false;
-    const std::string sql = "SELECT cache_key, cache_value FROM cache_snapshot";
-    if (mysql_query(conn_, sql.c_str())) {
-        MINIREDIS_LOG_ERROR("mysql") << "loadAll error: " << mysql_error(conn_);
-        return false;
-    }
-    MYSQL_RES* res = mysql_store_result(conn_);
-    if (!res) return false;
-    MYSQL_ROW row;
-    out.clear();
-    //旧版格式key空格value
-    while ((row = mysql_fetch_row(res))) {
-        if (row[0] && row[1]) out[row[0]] = row[1];
-    }
-    mysql_free_result(res);
-    return true;
-}
-
-bool MySQLClient::saveSnapshot(const std::unordered_map<std::string, std::string>& data) {
-    if (!ensureConnection()) return false;
-    if (!executeQuery("START TRANSACTION")) return false;
-    if (!executeQuery("TRUNCATE TABLE cache_snapshot")) {
-        executeQuery("ROLLBACK");
-        return false;
-    }
-    if (data.empty()) return executeQuery("COMMIT");
-    std::ostringstream oss;
-    oss << "INSERT INTO cache_snapshot (cache_key, cache_value) VALUES ";
-    bool first = true;
-    for (const auto& [key, value] : data) {
-        if (!first) oss << ",";
-        first = false;
-        char* escapedKey = new char[key.length() * 2 + 1];
-        char* escapedVal = new char[value.length() * 2 + 1];
-        mysql_real_escape_string(conn_, escapedKey, key.c_str(), key.length());
-        mysql_real_escape_string(conn_, escapedVal, value.c_str(), value.length());
-        oss << "('" << escapedKey << "','" << escapedVal << "')";
-        delete[] escapedKey;
-        delete[] escapedVal;
-    }
-    if (mysql_query(conn_, oss.str().c_str())) {
-        MINIREDIS_LOG_ERROR("mysql") << "insert error: " << mysql_error(conn_);
-        executeQuery("ROLLBACK");
-        return false;
-    }
-    return executeQuery("COMMIT");
-}
-
-bool MySQLClient::registerNode(const std::string& node_addr, int ttl_sec) {
+bool MySQLClient::registerNode(const std::string& node_addr) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!ensureConnection()) return false;
     // 使用 INSERT ... ON DUPLICATE KEY UPDATE 更新 last_seen
-    std::string sql = "INSERT INTO cluster_nodes (node_addr, last_seen) VALUES ('" + node_addr + "', NOW()) "
+    const std::string escaped_addr = escapeSqlString(conn_, node_addr);
+    std::string sql = "INSERT INTO cluster_nodes (node_addr, last_seen) VALUES ('" + escaped_addr + "', NOW()) "
                       "ON DUPLICATE KEY UPDATE last_seen = NOW()";
     if (mysql_query(conn_, sql.c_str())) {
         MINIREDIS_LOG_ERROR("mysql") << "registerNode failed: " << mysql_error(conn_);
@@ -146,7 +100,8 @@ std::vector<std::string> MySQLClient::getActiveNodes(int timeout_sec) {
 void MySQLClient::unregisterNode(const std::string& node_addr) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!ensureConnection()) return;
-    std::string sql = "DELETE FROM cluster_nodes WHERE node_addr = '" + node_addr + "'";
+    std::string sql = "DELETE FROM cluster_nodes WHERE node_addr = '" +
+                      escapeSqlString(conn_, node_addr) + "'";
     mysql_query(conn_, sql.c_str()); 
 }
 

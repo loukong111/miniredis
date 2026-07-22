@@ -54,12 +54,31 @@ bool splitNodeAddr(const std::string& node, std::string& host, int& port) {
     size_t pos = node.rfind(':');
     if (pos == std::string::npos || pos == 0 || pos + 1 >= node.size()) return false;
     host = node.substr(0, pos);
-    try {
-        port = std::stoi(node.substr(pos + 1));
-    } catch (...) {
-        return false;
+    const std::string_view port_text(node.data() + pos + 1, node.size() - pos - 1);
+    auto [ptr, ec] = std::from_chars(port_text.data(), port_text.data() + port_text.size(), port);
+    return ec == std::errc() && ptr == port_text.data() + port_text.size() &&
+           port > 0 && port <= 65535;
+}
+
+std::vector<std::string> splitReplicaNodes(const std::string& nodes) {
+    std::vector<std::string> result;
+    std::unordered_set<std::string> seen;
+    size_t start = 0;
+    while (start <= nodes.size()) {
+        size_t end = nodes.find(',', start);
+        std::string node = nodes.substr(start, end == std::string::npos
+                                                  ? std::string::npos
+                                                  : end - start);
+        size_t first = node.find_first_not_of(" \t\r\n");
+        size_t last = node.find_last_not_of(" \t\r\n");
+        if (first != std::string::npos) {
+            node = node.substr(first, last - first + 1);
+            if (seen.insert(node).second) result.push_back(std::move(node));
+        }
+        if (end == std::string::npos) break;
+        start = end + 1;
     }
-    return port > 0 && port <= 65535;
+    return result;
 }
 
 std::string encodeRespCommand(const std::vector<std::string>& parts) {
@@ -118,6 +137,7 @@ bool readRespValueBlocking(int fd, RespValue& value) {
                 value = std::move(*parsed);
                 return true;
             }
+            if (decoder.hasProtocolError()) return false;
             continue;
         }
         if (n < 0 && errno == EINTR) continue;
@@ -243,7 +263,7 @@ bool fetchClusterSlotMap(const std::string& node,
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
+    addr.sin_port = htons(static_cast<uint16_t>(port));
     if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1 ||
         connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
         close(fd);
@@ -313,7 +333,7 @@ bool pingClusterNode(const std::string& node, const std::string& password) {
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
+    addr.sin_port = htons(static_cast<uint16_t>(port));
     if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
         close(fd);
         return false;
@@ -414,7 +434,14 @@ Task handleClient(Scheduler& scheduler, CommandHandler& command_handler,
             size_t parsed_commands = 0;
             while (!close_after_write) {
                 auto opt_cmd = decoder.parse();
-                if (!opt_cmd) break;
+                if (!opt_cmd) {
+                    if (decoder.hasProtocolError()) {
+                        outbuf = RespWriter::error("Protocol error: " + decoder.protocolError());
+                        close_after_write = true;
+                        writing = true;
+                    }
+                    break;
+                }
                 ++parsed_commands;
                 if (parsed_commands > config.max_pipeline_commands) {
                     outbuf = RespWriter::error("pipeline command limit exceeded");
@@ -522,12 +549,13 @@ MiniRedisServer::MiniRedisServer(AppConfig config)
       memory_pool_(1024),
       thread_pool_(4, 16, 5),
       cache_(memory_pool_, config_.cache_shards),
-      replication_backlog_(10000),
-      replication_offset_(0),
       next_io_scheduler_(0),
       running_(true),
       stats_running_(false),
-      listen_fd_(-1) {}
+      listen_fd_(-1),
+      replication_backlog_(config_.replication_backlog_size),
+      replication_offset_(0),
+      replica_following_(!config_.replicaof.empty()) {}
 
 MiniRedisServer::~MiniRedisServer() {
     stop();
@@ -583,6 +611,7 @@ bool MiniRedisServer::configureCluster() {
 
 void MiniRedisServer::saveClusterConfigIfNeeded() const {
     if (!config_.cluster_mode || !slot_map_ || config_.cluster_config_file.empty()) return;
+    std::lock_guard<std::mutex> lock(cluster_config_save_mutex_);
     if (!saveClusterConfig(config_.cluster_config_file, *slot_map_)) {
         MINIREDIS_LOG_WARN("cluster") << "failed to persist cluster config: "
                                       << config_.cluster_config_file;
@@ -601,7 +630,7 @@ int MiniRedisServer::bindListen() const {
 
     struct sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_port = htons(config_.port);
+    addr.sin_port = htons(static_cast<uint16_t>(config_.port));
     if (inet_pton(AF_INET, config_.bind_addr.c_str(), &addr.sin_addr) != 1) {
         MINIREDIS_LOG_ERROR("server") << "invalid bind address: " << config_.bind_addr;
         close(listen_fd);
@@ -647,7 +676,7 @@ void MiniRedisServer::startClusterDiscovery() {
             MINIREDIS_LOG_WARN("cluster") << "mysql cluster discovery disabled: " << e.what();
         }
 
-        if (mysql_ && !mysql_->registerNode(current_node_, 30)) {
+        if (mysql_ && !mysql_->registerNode(current_node_)) {
             MINIREDIS_LOG_WARN("cluster") << "failed to register node in cluster table";
         }
     }
@@ -671,6 +700,9 @@ void MiniRedisServer::startClusterDiscovery() {
             discovery_elapsed_sec += config_.cluster_heartbeat_interval_sec;
             if (mysql_ && discovery_elapsed_sec >= 10) {
                 discovery_elapsed_sec = 0;
+                if (!mysql_->registerNode(current_node_)) {
+                    MINIREDIS_LOG_WARN("cluster") << "failed to refresh cluster node heartbeat";
+                }
                 auto nodes = mysql_->getActiveNodes(30);
                 if (!nodes.empty()) {
                     {
@@ -747,7 +779,11 @@ void MiniRedisServer::startClusterDiscovery() {
 }
 
 bool MiniRedisServer::syncFromMaster() {
-    if (config_.replicaof.empty()) return true;
+    if (config_.replicaof.empty() || !replica_following_.load(std::memory_order_acquire)) {
+        return true;
+    }
+
+    std::lock_guard<std::mutex> apply_lock(replication_apply_mutex_);
 
     std::string host;
     int port = 0;
@@ -756,13 +792,41 @@ bool MiniRedisServer::syncFromMaster() {
         return false;
     }
 
-    uint64_t last_offset = loadReplicationOffset();
+    uint64_t last_offset = replication_offset_.load(std::memory_order_acquire);
+    if (last_offset == 0) last_offset = loadReplicationOffset();
     replication_offset_.store(last_offset, std::memory_order_relaxed);
-    if (last_offset > 0 && tryPartialSyncFromMaster(host, port, last_offset)) {
+    if (tryPartialSyncFromMaster(host, port, last_offset)) {
         return true;
     }
 
     return fullSyncFromMaster(host, port);
+}
+
+void MiniRedisServer::startReplicationSync() {
+    if (config_.replicaof.empty()) return;
+
+    replication_sync_thread_ = std::thread([this]() {
+        const auto sync_interval =
+            std::chrono::milliseconds(config_.replication_sync_interval_ms);
+        while (running_.load(std::memory_order_acquire) &&
+               replica_following_.load(std::memory_order_acquire)) {
+            const auto deadline = std::chrono::steady_clock::now() + sync_interval;
+            while (running_.load(std::memory_order_acquire) &&
+                   replica_following_.load(std::memory_order_acquire) &&
+                   std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            if (!running_.load(std::memory_order_acquire) ||
+                !replica_following_.load(std::memory_order_acquire)) {
+                break;
+            }
+            if (!syncFromMaster()) {
+                MINIREDIS_LOG_WARN("replication")
+                    << "periodic replication catch-up from " << config_.replicaof
+                    << " failed; retrying";
+            }
+        }
+    });
 }
 
 bool MiniRedisServer::tryPartialSyncFromMaster(const std::string& host, int port,
@@ -781,7 +845,7 @@ bool MiniRedisServer::tryPartialSyncFromMaster(const std::string& host, int port
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
+    addr.sin_port = htons(static_cast<uint16_t>(port));
     if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1 ||
         connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
         MINIREDIS_LOG_WARN("replication") << "failed to connect master "
@@ -854,6 +918,12 @@ bool MiniRedisServer::tryPartialSyncFromMaster(const std::string& host, int port
     }
 
     uint64_t master_offset = static_cast<uint64_t>(response.array[1].integer);
+    if (applied_offset != master_offset) {
+        MINIREDIS_LOG_WARN("replication") << "partial sync ended at offset "
+                                          << applied_offset << " but master reported "
+                                          << master_offset;
+        return false;
+    }
     replication_offset_.store(master_offset, std::memory_order_relaxed);
     saveReplicationOffset(master_offset);
     MINIREDIS_LOG_INFO("replication") << "partial sync applied offset "
@@ -877,7 +947,7 @@ bool MiniRedisServer::fullSyncFromMaster(const std::string& host, int port) {
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
+    addr.sin_port = htons(static_cast<uint16_t>(port));
     if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1 ||
         connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
         MINIREDIS_LOG_WARN("replication") << "failed to connect master "
@@ -962,6 +1032,13 @@ bool MiniRedisServer::fullSyncFromMaster(const std::string& host, int port) {
 bool MiniRedisServer::applyReplicationCommand(const std::vector<std::string>& command,
                                               uint64_t offset) {
     if (command.empty()) return false;
+    const uint64_t current_offset = replication_offset_.load(std::memory_order_acquire);
+    if (offset <= current_offset) return true;
+    if (offset != current_offset + 1) {
+        MINIREDIS_LOG_WARN("replication") << "replication gap: expected offset "
+                                          << current_offset + 1 << ", got " << offset;
+        return false;
+    }
     std::string cmd = command[0];
     std::transform(cmd.begin(), cmd.end(), cmd.begin(),
                    [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
@@ -1089,13 +1166,25 @@ int MiniRedisServer::run() {
     }
 
     ReplicationBacklog* active_backlog = config_.replicaof.empty() ? &replication_backlog_ : nullptr;
+    const auto configured_replicas = splitReplicaNodes(config_.replicas_str);
+    if (active_backlog && !configured_replicas.empty()) {
+        replication_dispatcher_ = std::make_unique<ReplicationDispatcher>(
+            replication_backlog_, configured_replicas, config_.requirepass,
+            std::chrono::milliseconds(config_.replication_reconnect_delay_ms));
+        replication_dispatcher_->start();
+    }
     CommandHandler command_handler(cache_, memory_pool_, config_, config_.cluster_mode,
                                    current_node_, slot_map_.get(), &slot_map_mutex_,
                                    aof_.get(),
                                    [this]() { saveClusterConfigIfNeeded(); },
                                    active_backlog,
                                    &replication_offset_,
-                                   [this](uint64_t offset) { saveReplicationOffset(offset); });
+                                   [this](uint64_t offset) { saveReplicationOffset(offset); },
+                                   replication_dispatcher_.get(),
+                                   &replication_apply_mutex_,
+                                   [this]() {
+                                       replica_following_.store(false, std::memory_order_release);
+                                   });
     command_handler.refreshRuntimeStats();
 
     io_schedulers_.reserve(config_.io_threads);
@@ -1112,8 +1201,15 @@ int MiniRedisServer::run() {
                                                config_, running_, listen_fd_));
     accept_thread_ = std::thread([this]() { accept_scheduler_.start(); });
     Stats::instance().setReady(true);
+    startReplicationSync();
 
+    auto next_expiration_cleanup = std::chrono::steady_clock::now();
     while (running_.load()) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= next_expiration_cleanup) {
+            cache_.cleanup();
+            next_expiration_cleanup = now + std::chrono::seconds(1);
+        }
         command_handler.refreshRuntimeStats();
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
@@ -1146,6 +1242,9 @@ void MiniRedisServer::stop() {
     }
     io_threads_.clear();
     io_schedulers_.clear();
+
+    if (replication_dispatcher_) replication_dispatcher_->stop();
+    if (replication_sync_thread_.joinable()) replication_sync_thread_.join();
 
     if (stats_thread_.joinable()) stats_thread_.join();
 

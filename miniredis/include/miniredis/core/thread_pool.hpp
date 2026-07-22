@@ -48,23 +48,30 @@ public:
 
 private:
     void worker_loop();
-    void monitor_loop();            // 监控线程入口
-    void try_expand();              // 扩缩容策略调用
-    void try_shrink();              // 尝试缩容
+    void monitor_loop();
+    void try_expand();
+    void spawn_worker();
+    void record_finished_worker();
+    void reap_finished_workers();
 
     std::vector<std::thread> workers_;
+    std::mutex workers_mutex_;
+    std::vector<std::thread::id> finished_workers_;
+    std::mutex finished_workers_mutex_;
     std::queue<Task> tasks_;
     mutable std::mutex queue_mutex_;
     std::condition_variable condition_;
     std::atomic<bool> stop_;
-    std::atomic<size_t> active_threads_;//存活线程
-    std::atomic<size_t> idle_threads_;//不处于等待的线程
+    std::atomic<size_t> active_threads_; // 存活线程
+    std::atomic<size_t> idle_threads_;   // 正在等待任务的线程
     size_t min_threads_;
     size_t max_threads_;
     size_t idle_timeout_sec_;
     size_t monitor_interval_sec_;
 
-    std::thread monitor_thread_;    // 监控线程
+    std::mutex monitor_mutex_;
+    std::condition_variable monitor_condition_;
+    std::thread monitor_thread_;
 };
 
 } // namespace miniredis

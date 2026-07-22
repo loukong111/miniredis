@@ -34,6 +34,23 @@ bool parseU64(const std::string& value, uint64_t& out) {
     return ec == std::errc() && ptr == value.data() + value.size();
 }
 
+bool truncateAndSync(const std::string& path, size_t size) {
+    int fd = ::open(path.c_str(), O_WRONLY | O_CLOEXEC);
+    if (fd < 0) {
+        MINIREDIS_LOG_ERROR("aof") << "failed to open AOF for repair: " << path
+                                   << " error=" << std::strerror(errno);
+        return false;
+    }
+    bool ok = (::ftruncate(fd, static_cast<off_t>(size)) == 0);
+    if (ok) ok = (::fsync(fd) == 0);
+    if (!ok) {
+        MINIREDIS_LOG_ERROR("aof") << "failed to repair AOF tail: " << path
+                                   << " error=" << std::strerror(errno);
+    }
+    ::close(fd);
+    return ok;
+}
+
 } // namespace
 
 bool parseAppendFsyncPolicy(const std::string& value, AppendFsyncPolicy& policy) {
@@ -217,7 +234,8 @@ uint64_t AppendOnlyFile::currentUnixMillis() {
 }
 
 uint64_t AppendOnlyFile::expireAtMillis(int ttl_seconds) {
-    return currentUnixMillis() + static_cast<uint64_t>(ttl_seconds) * 1000ULL;
+    return currentUnixMillis() +
+           static_cast<uint64_t>(ttl_seconds) * static_cast<uint64_t>(1000);
 }
 
 std::string AppendOnlyFile::encodeCommand(const std::vector<std::string>& parts) {
@@ -300,11 +318,20 @@ bool AppendOnlyFile::replay(SnapshotData& data) const {
     RespDecoder decoder;
     decoder.feed(content);
 
+    SnapshotData replayed = data;
     size_t applied = 0;
     while (decoder.bufferedSize() > 0) {
         auto value = decoder.parse();
         if (!value) {
-            MINIREDIS_LOG_WARN("aof") << "ignore incomplete or invalid AOF tail: " << path_;
+            const size_t valid_bytes = content.size() - decoder.bufferedSize();
+            if (decoder.hasProtocolError() && valid_bytes == 0) {
+                MINIREDIS_LOG_ERROR("aof") << "invalid AOF before first complete record: "
+                                           << decoder.protocolError();
+                return false;
+            }
+            if (!truncateAndSync(path_, valid_bytes)) return false;
+            MINIREDIS_LOG_WARN("aof") << "repaired incomplete or invalid AOF tail at byte "
+                                      << valid_bytes << ": " << path_;
             break;
         }
         if (value->type != RespType::ARRAY) {
@@ -321,13 +348,14 @@ bool AppendOnlyFile::replay(SnapshotData& data) const {
             }
             parts.push_back(arg.str);
         }
-        if (!applyCommand(parts, data)) {
+        if (!applyCommand(parts, replayed)) {
             MINIREDIS_LOG_ERROR("aof") << "invalid AOF command";
             return false;
         }
         ++applied;
     }
 
+    data = std::move(replayed);
     MINIREDIS_LOG_INFO("aof") << "replayed " << applied << " AOF records from " << path_;
     return true;
 }

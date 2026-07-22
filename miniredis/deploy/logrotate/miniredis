@@ -1,0 +1,10 @@
+/var/log/miniredis/*.log {
+    daily
+    rotate 14
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+    su miniredis miniredis
+}
