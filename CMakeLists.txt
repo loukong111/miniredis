@@ -9,6 +9,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # 项目通过 option 控制测试维度，实现“开发构建”和“CI 构建”分离。
 option(MINIREDIS_ENABLE_INTEGRATION_TESTS "Enable redis-cli/curl based integration tests" ON)
 option(MINIREDIS_BUILD_QT_CONSOLE "Build the optional Qt demo console" OFF)
+option(MINIREDIS_ENABLE_MYSQL_DISCOVERY "Build optional MySQL-backed cluster discovery" ON)
 option(MINIREDIS_ENABLE_ASAN "Enable AddressSanitizer" OFF)
 option(MINIREDIS_ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)
 option(MINIREDIS_ENABLE_TSAN "Enable ThreadSanitizer" OFF)
@@ -66,6 +67,9 @@ include_directories(${CMAKE_SOURCE_DIR}/include)
 
 if(MINIREDIS_BUILD_SERVER OR MINIREDIS_BUILD_TESTS)
     find_package(Threads REQUIRED)
+endif()
+
+if((MINIREDIS_BUILD_SERVER OR MINIREDIS_BUILD_TESTS) AND MINIREDIS_ENABLE_MYSQL_DISCOVERY)
     find_library(MYSQL_CLIENT_LIB mysqlclient)
     if(MYSQL_CLIENT_LIB)
         message(STATUS "Found mysqlclient: ${MYSQL_CLIENT_LIB}")
@@ -74,7 +78,10 @@ if(MINIREDIS_BUILD_SERVER OR MINIREDIS_BUILD_TESTS)
         message(STATUS "mysqlclient not found, MySQL cluster discovery disabled")
         set(HAVE_MYSQL OFF)
     endif()
+elseif(MINIREDIS_ENABLE_MYSQL_DISCOVERY)
+    set(HAVE_MYSQL OFF)
 else()
+    message(STATUS "MySQL cluster discovery disabled by configuration")
     set(HAVE_MYSQL OFF)
 endif()
 
@@ -160,6 +167,7 @@ if(MINIREDIS_BUILD_TESTS AND MINIREDIS_ENABLE_INTEGRATION_TESTS AND MINIREDIS_BU
     find_program(BASH_PROGRAM bash)
     find_program(REDIS_CLI_PROGRAM redis-cli)
     find_program(CURL_PROGRAM curl)
+    find_program(PYTHON3_PROGRAM python3)
     if(BASH_PROGRAM AND REDIS_CLI_PROGRAM AND CURL_PROGRAM)
         add_test(
             NAME miniredis_integration_smoke
@@ -184,7 +192,23 @@ if(MINIREDIS_BUILD_TESTS AND MINIREDIS_ENABLE_INTEGRATION_TESTS AND MINIREDIS_BU
             TIMEOUT 60
             RESOURCE_LOCK miniredis_ports
         )
+
     else()
         message(STATUS "Skipping integration tests: bash, redis-cli, or curl not found")
+    endif()
+
+    if(PYTHON3_PROGRAM)
+        add_test(
+            NAME miniredis_protocol_limits
+            COMMAND ${PYTHON3_PROGRAM}
+                    ${CMAKE_SOURCE_DIR}/tests/integration/protocol_limits.py
+                    $<TARGET_FILE:miniredis>
+        )
+        set_tests_properties(miniredis_protocol_limits PROPERTIES
+            TIMEOUT 45
+            RESOURCE_LOCK miniredis_ports
+        )
+    else()
+        message(STATUS "Skipping raw protocol limits test: python3 not found")
     endif()
 endif()

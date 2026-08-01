@@ -150,6 +150,8 @@ run_auth_kv_stats_snapshot_smoke() {
   grep -q '"aof_last_rewrite_records":' <<<"${stats}"
   "${CURL}" -fsS "http://127.0.0.1:${stats_port}/healthz" | grep -q '"status":"ok"'
   "${CURL}" -fsS "http://127.0.0.1:${stats_port}/readyz" | grep -q '"status":"ready"'
+  assert_eq "$("${CURL}" -sS -o /dev/null -w '%{http_code}' -X POST \
+    "http://127.0.0.1:${stats_port}/stats")" "405" "stats unsupported method"
   metrics="$("${CURL}" -fsS "http://127.0.0.1:${stats_port}/metrics")"
   grep -q 'miniredis_total_commands' <<<"${metrics}"
   grep -q 'miniredis_hit_rate' <<<"${metrics}"

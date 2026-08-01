@@ -65,20 +65,37 @@ bool write_all(int client_fd, const std::string& response) {
 }
 
 std::string make_response(const std::string& status, const std::string& content_type,
-                          const std::string& body) {
+                          const std::string& body,
+                          const std::string& extra_headers = {}) {
     return "HTTP/1.1 " + status + "\r\n"
            "Content-Type: " + content_type + "\r\n"
            "Content-Length: " + std::to_string(body.size()) + "\r\n"
+           + extra_headers +
            "Connection: close\r\n"
            "\r\n" + body;
 }
 
-bool request_line_matches(const std::string& request, const std::string& method,
-                          const std::string& path) {
+bool parse_request_line(const std::string& request, std::string_view& method,
+                        std::string_view& path) {
     size_t line_end = request.find("\r\n");
-    std::string_view line(request.data(), line_end == std::string::npos ? request.size() : line_end);
-    std::string expected = method + " " + path + " ";
-    return line.rfind(expected, 0) == 0;
+    if (line_end == std::string::npos) return false;
+
+    std::string_view line(request.data(), line_end);
+    size_t first_space = line.find(' ');
+    if (first_space == std::string_view::npos || first_space == 0) return false;
+    size_t second_space = line.find(' ', first_space + 1);
+    if (second_space == std::string_view::npos || second_space == first_space + 1) return false;
+    if (line.find(' ', second_space + 1) != std::string_view::npos) return false;
+    if (!line.substr(second_space + 1).starts_with("HTTP/")) return false;
+
+    method = line.substr(0, first_space);
+    path = line.substr(first_space + 1, second_space - first_space - 1);
+    return true;
+}
+
+bool is_known_path(std::string_view path) {
+    return path == "/stats" || path == "/metrics" ||
+           path == "/healthz" || path == "/readyz";
 }
 
 } // namespace
@@ -92,31 +109,48 @@ static void handle_client(int client_fd) {
         return;
     }
 
-    if (request.find("\r\n\r\n") == std::string::npos &&
-        request.size() >= kMaxHttpRequestBytes) {
-        const std::string response = make_response("431 Request Header Fields Too Large",
-                                                   "text/plain", "request header too large\n");
+    const bool headers_complete = request.find("\r\n\r\n") != std::string::npos;
+    if (!headers_complete) {
+        const bool too_large = request.size() >= kMaxHttpRequestBytes;
+        const std::string response = make_response(
+            too_large ? "431 Request Header Fields Too Large" : "400 Bad Request",
+            "text/plain",
+            too_large ? "request header too large\n" : "incomplete request headers\n");
         write_all(client_fd, response);
-    } else if (request_line_matches(request, "GET", "/stats")) {
+        close(client_fd);
+        return;
+    }
+
+    std::string_view method;
+    std::string_view path;
+    if (!parse_request_line(request, method, path)) {
+        const std::string response = make_response("400 Bad Request", "text/plain",
+                                                   "malformed request line\n");
+        write_all(client_fd, response);
+    } else if (!is_known_path(path)) {
+        const std::string response = make_response("404 Not Found", "text/plain", "not found\n");
+        write_all(client_fd, response);
+    } else if (method != "GET") {
+        const std::string response = make_response("405 Method Not Allowed", "text/plain",
+                                                   "method not allowed\n", "Allow: GET\r\n");
+        write_all(client_fd, response);
+    } else if (path == "/stats") {
         std::string body = Stats::instance().toJson();
         std::string response = make_response("200 OK", "application/json", body);
         write_all(client_fd, response);
-    } else if (request_line_matches(request, "GET", "/metrics")) {
+    } else if (path == "/metrics") {
         std::string body = Stats::instance().toPrometheus();
         std::string response = make_response("200 OK", "text/plain; version=0.0.4", body);
         write_all(client_fd, response);
-    } else if (request_line_matches(request, "GET", "/healthz")) {
+    } else if (path == "/healthz") {
         const std::string body = "{\"status\":\"ok\"}\n";
         std::string response = make_response("200 OK", "application/json", body);
         write_all(client_fd, response);
-    } else if (request_line_matches(request, "GET", "/readyz")) {
+    } else if (path == "/readyz") {
         const bool ready = Stats::instance().ready();
         const std::string body = ready ? "{\"status\":\"ready\"}\n" : "{\"status\":\"not_ready\"}\n";
         std::string response = make_response(ready ? "200 OK" : "503 Service Unavailable",
                                              "application/json", body);
-        write_all(client_fd, response);
-    } else {
-        const std::string response = make_response("404 Not Found", "text/plain", "not found\n");
         write_all(client_fd, response);
     }
     close(client_fd);

@@ -55,6 +55,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential \
             cmake \
+            curl \
             redis-tools
 
       - name: Configure ASan UBSan
@@ -62,25 +63,18 @@ jobs:
           cmake -S . -B build-sanitize \
             -DCMAKE_BUILD_TYPE=Debug \
             -DMINIREDIS_BUILD_QT_CONSOLE=OFF \
-            -DMINIREDIS_ENABLE_INTEGRATION_TESTS=OFF \
-            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" \
-            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+            -DMINIREDIS_ENABLE_INTEGRATION_TESTS=ON \
+            -DMINIREDIS_ENABLE_ASAN=ON \
+            -DMINIREDIS_ENABLE_UBSAN=ON
 
       - name: Build ASan UBSan
         run: cmake --build build-sanitize -j"$(nproc)"
 
-      - name: Unit tests under sanitizers
+      - name: Full test suite under sanitizers
         env:
           ASAN_OPTIONS: detect_leaks=0:halt_on_error=1
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
-        run: ./build-sanitize/miniredis_unit_tests
-
-      - name: Automatic failover under sanitizers
-        env:
-          SERVER: ${{ github.workspace }}/build-sanitize/miniredis
-          ASAN_OPTIONS: detect_leaks=0:halt_on_error=1
-          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
-        run: timeout 60s scripts/failover_demo.sh smoke
+        run: ctest --test-dir build-sanitize --output-on-failure
 
   docker-build:
     runs-on: ubuntu-24.04
@@ -108,3 +102,38 @@ jobs:
 
       - name: Check platform build boundary
         run: scripts/check_platform_build.sh
+
+  qt-console-build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            cmake \
+            qt6-base-dev \
+            qt6-qpa-plugins
+
+      - name: Configure Qt-only client
+        run: |
+          cmake -S . -B build-qt-client \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DMINIREDIS_BUILD_SERVER=OFF \
+            -DMINIREDIS_BUILD_TESTS=OFF \
+            -DMINIREDIS_BUILD_QT_CONSOLE=ON
+
+      - name: Build Qt Console
+        run: cmake --build build-qt-client -j"$(nproc)"
+
+      - name: Render Qt views offscreen
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          build-qt-client/tools/qt_console/miniredis_qt_console \
+            --export-screenshots /tmp/miniredis-qt-screens
+          test "$(find /tmp/miniredis-qt-screens -maxdepth 1 -name '*.png' | wc -l)" -eq 6

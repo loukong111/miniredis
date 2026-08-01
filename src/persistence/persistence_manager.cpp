@@ -29,7 +29,7 @@ void PersistenceManager::stop() {
     while (snapshot_running_.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
-    takeSnapshot(); 
+    takeSnapshot();
 }
 
 bool PersistenceManager::takeSnapshot() { return saveSnapshotToFile(); }

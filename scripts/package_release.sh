@@ -14,7 +14,10 @@ rm -rf "${STAGE_DIR}" "${ARCHIVE}"
 
 cmake -S "${ROOT_DIR}" -B "${BUILD_DIR}" \
   -DCMAKE_BUILD_TYPE=Release \
+  -DMINIREDIS_BUILD_SERVER=ON \
+  -DMINIREDIS_BUILD_TESTS=OFF \
   -DMINIREDIS_BUILD_QT_CONSOLE=OFF \
+  -DMINIREDIS_ENABLE_MYSQL_DISCOVERY=OFF \
   -DMINIREDIS_ENABLE_INTEGRATION_TESTS=OFF
 cmake --build "${BUILD_DIR}" -j"$(nproc)"
 
@@ -41,7 +44,7 @@ install -m 0644 "${ROOT_DIR}/docs/usage.md" "${STAGE_DIR}/docs/usage.md"
 cat >"${STAGE_DIR}/VERSION" <<EOF
 version=${VERSION}
 build_time=$(date -Iseconds)
-source=${ROOT_DIR}
+source=miniredis
 EOF
 
 tar -C "${DIST_DIR}" -czf "${ARCHIVE}" "${PACKAGE_NAME}"

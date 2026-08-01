@@ -20,5 +20,6 @@ cmake -S "${ROOT_DIR}" -B "${CLIENT_BUILD_DIR}" \
   -DMINIREDIS_BUILD_SERVER=OFF \
   -DMINIREDIS_BUILD_TESTS=OFF \
   -DMINIREDIS_BUILD_QT_CONSOLE="${MINIREDIS_BUILD_QT_CONSOLE:-OFF}"
+cmake --build "${CLIENT_BUILD_DIR}" -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)"
 
 echo "Platform build boundary check passed."

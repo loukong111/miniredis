@@ -30,7 +30,7 @@ void FixedMemoryPool::grow_unlocked(size_t num_blocks) {
     char* chunk = owner.get();
     chunks_.push_back(chunk);
     owner.release();
-    
+
     // 将这块内存切分成Block，串成链表
     Block* prev = nullptr;
     for (size_t i = 0; i < num_blocks; ++i) {

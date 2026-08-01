@@ -8,6 +8,11 @@
 - CMake 3.20+
 - 支持 C++20 的 g++
 - 可选：`libmysqlclient-dev`
+
+MySQL 节点发现默认在检测到 `mysqlclient` 时参与本地构建。若要生成不依赖
+MySQL 运行库的通用服务端二进制，配置时加入
+`-DMINIREDIS_ENABLE_MYSQL_DISCOVERY=OFF`。`scripts/package_release.sh` 和
+Docker 镜像默认采用这一便携配置。
 - 可选：`redis-tools`，用于 `redis-cli` 和 `redis-benchmark`
 - 可选：`Qt6 Core/Widgets/Network`，用于构建 Qt Console
 

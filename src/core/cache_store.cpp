@@ -76,7 +76,7 @@ void CacheEntry::release(FixedMemoryPool& pool) {
     }
     data = nullptr;
     size = 0;
-    is_pool_allocated = true; 
+    is_pool_allocated = true;
 }
 
 CacheStore::CacheStore(FixedMemoryPool& pool, size_t shard_count) : pool_(pool) {

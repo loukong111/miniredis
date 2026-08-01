@@ -102,7 +102,7 @@ void MySQLClient::unregisterNode(const std::string& node_addr) {
     if (!ensureConnection()) return;
     std::string sql = "DELETE FROM cluster_nodes WHERE node_addr = '" +
                       escapeSqlString(conn_, node_addr) + "'";
-    mysql_query(conn_, sql.c_str()); 
+    mysql_query(conn_, sql.c_str());
 }
 
 }

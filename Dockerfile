@@ -13,7 +13,9 @@ COPY . .
 
 RUN cmake -S . -B build \
         -DCMAKE_BUILD_TYPE=Release \
+        -DMINIREDIS_BUILD_TESTS=OFF \
         -DMINIREDIS_ENABLE_INTEGRATION_TESTS=OFF \
+        -DMINIREDIS_ENABLE_MYSQL_DISCOVERY=OFF \
         -DMINIREDIS_BUILD_QT_CONSOLE=OFF && \
     cmake --build build -j"$(nproc)"
 

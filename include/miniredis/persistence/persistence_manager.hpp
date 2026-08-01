@@ -12,7 +12,7 @@ namespace miniredis {
 
 class PersistenceManager {
 public:
-    PersistenceManager(CacheStore& cache, const std::string& snapshot_file, 
+    PersistenceManager(CacheStore& cache, const std::string& snapshot_file,
         DynamicThreadPool& pool, int interval_sec = 20);
     ~PersistenceManager();
 

@@ -122,6 +122,10 @@ scripts/package_release.sh
 ls -lh dist/miniredis-linux-x86_64-*.tar.gz
 ```
 
+通用发布包默认关闭可选的 MySQL 节点发现，避免目标服务器额外依赖
+`libmysqlclient`。需要 MySQL 动态发现时，请安装对应开发与运行库，并使用
+`-DMINIREDIS_ENABLE_MYSQL_DISCOVERY=ON` 单独构建。
+
 ## 持久化恢复
 
 启动时恢复顺序：
