@@ -63,8 +63,6 @@ function(miniredis_apply_sanitizers target_name)
     endif()
 endfunction()
 
-include_directories(${CMAKE_SOURCE_DIR}/include)
-
 if(MINIREDIS_BUILD_SERVER OR MINIREDIS_BUILD_TESTS)
     find_package(Threads REQUIRED)
 endif()
@@ -85,48 +83,49 @@ else()
     set(HAVE_MYSQL OFF)
 endif()
 
-set(MINIREDIS_LIB_SOURCES
-    ${CMAKE_SOURCE_DIR}/src/core/cache_store.cpp
-    ${CMAKE_SOURCE_DIR}/src/core/logger.cpp
-    ${CMAKE_SOURCE_DIR}/src/core/memory_pool.cpp
-    ${CMAKE_SOURCE_DIR}/src/core/thread_pool.cpp
-    ${CMAKE_SOURCE_DIR}/src/net/scheduler.cpp
-    ${CMAKE_SOURCE_DIR}/src/net/resp_parser.cpp
-    ${CMAKE_SOURCE_DIR}/src/persistence/persistence_manager.cpp
-    ${CMAKE_SOURCE_DIR}/src/cluster/slot_map.cpp
-    ${CMAKE_SOURCE_DIR}/src/cluster/cluster_config_store.cpp
-    ${CMAKE_SOURCE_DIR}/src/cluster/cluster_utils.cpp
-    ${CMAKE_SOURCE_DIR}/src/metrics/stats.cpp
-    ${CMAKE_SOURCE_DIR}/src/metrics/http_stats.cpp
-    ${CMAKE_SOURCE_DIR}/src/persistence/append_only_file.cpp
-    ${CMAKE_SOURCE_DIR}/src/persistence/file_persistence.cpp
-    ${CMAKE_SOURCE_DIR}/src/server/config.cpp
-    ${CMAKE_SOURCE_DIR}/src/server/command_handler.cpp
-    ${CMAKE_SOURCE_DIR}/src/server/failover_coordinator.cpp
-    ${CMAKE_SOURCE_DIR}/src/server/replication_dispatcher.cpp
-    ${CMAKE_SOURCE_DIR}/src/server/replication_state.cpp
-    ${CMAKE_SOURCE_DIR}/src/server/server.cpp
-)
-
-if(HAVE_MYSQL)
-    list(APPEND MINIREDIS_LIB_SOURCES ${CMAKE_SOURCE_DIR}/src/cluster/mysql_client.cpp)
-endif()
-
-set(SERVER_SOURCES
-    ${CMAKE_SOURCE_DIR}/main.cpp
-    ${MINIREDIS_LIB_SOURCES}
-)
-
-if(MINIREDIS_BUILD_SERVER)
-    add_executable(miniredis ${SERVER_SOURCES})
-
-    target_link_libraries(miniredis Threads::Threads)
-    miniredis_apply_sanitizers(miniredis)
+if(MINIREDIS_BUILD_SERVER OR MINIREDIS_BUILD_TESTS)
+    set(MINIREDIS_RUNTIME_SOURCES
+        src/core/cache_store.cpp
+        src/core/logger.cpp
+        src/core/memory_pool.cpp
+        src/core/thread_pool.cpp
+        src/net/scheduler.cpp
+        src/net/resp_parser.cpp
+        src/persistence/persistence_manager.cpp
+        src/persistence/append_only_file.cpp
+        src/persistence/file_persistence.cpp
+        src/cluster/slot_map.cpp
+        src/cluster/cluster_config_store.cpp
+        src/cluster/cluster_utils.cpp
+        src/metrics/stats.cpp
+        src/metrics/http_stats.cpp
+        src/server/config.cpp
+        src/server/command_handler.cpp
+        src/server/failover_coordinator.cpp
+        src/server/replication_dispatcher.cpp
+        src/server/replication_state.cpp
+        src/server/server.cpp
+    )
 
     if(HAVE_MYSQL)
-        target_link_libraries(miniredis ${MYSQL_CLIENT_LIB})
-        target_compile_definitions(miniredis PUBLIC HAVE_MYSQL)
+        list(APPEND MINIREDIS_RUNTIME_SOURCES src/cluster/mysql_client.cpp)
     endif()
+
+    add_library(miniredis_runtime STATIC ${MINIREDIS_RUNTIME_SOURCES})
+    target_include_directories(miniredis_runtime PUBLIC ${CMAKE_SOURCE_DIR}/include)
+    target_link_libraries(miniredis_runtime PUBLIC Threads::Threads)
+    miniredis_apply_sanitizers(miniredis_runtime)
+
+    if(HAVE_MYSQL)
+        target_link_libraries(miniredis_runtime PUBLIC ${MYSQL_CLIENT_LIB})
+        target_compile_definitions(miniredis_runtime PUBLIC HAVE_MYSQL)
+    endif()
+endif()
+
+if(MINIREDIS_BUILD_SERVER)
+    add_executable(miniredis src/app/main.cpp)
+    target_link_libraries(miniredis PRIVATE miniredis_runtime)
+    miniredis_apply_sanitizers(miniredis)
 endif()
 
 if(MINIREDIS_BUILD_QT_CONSOLE)
@@ -136,26 +135,8 @@ endif()
 if(MINIREDIS_BUILD_TESTS)
     enable_testing()
 
-    add_executable(miniredis_unit_tests
-        ${CMAKE_SOURCE_DIR}/tests/unit_tests.cpp
-        ${CMAKE_SOURCE_DIR}/src/core/cache_store.cpp
-        ${CMAKE_SOURCE_DIR}/src/core/logger.cpp
-        ${CMAKE_SOURCE_DIR}/src/persistence/file_persistence.cpp
-        ${CMAKE_SOURCE_DIR}/src/persistence/append_only_file.cpp
-        ${CMAKE_SOURCE_DIR}/src/core/memory_pool.cpp
-        ${CMAKE_SOURCE_DIR}/src/core/thread_pool.cpp
-        ${CMAKE_SOURCE_DIR}/src/net/resp_parser.cpp
-        ${CMAKE_SOURCE_DIR}/src/cluster/slot_map.cpp
-        ${CMAKE_SOURCE_DIR}/src/cluster/cluster_config_store.cpp
-        ${CMAKE_SOURCE_DIR}/src/cluster/cluster_utils.cpp
-        ${CMAKE_SOURCE_DIR}/src/metrics/stats.cpp
-        ${CMAKE_SOURCE_DIR}/src/server/config.cpp
-        ${CMAKE_SOURCE_DIR}/src/server/command_handler.cpp
-        ${CMAKE_SOURCE_DIR}/src/server/failover_coordinator.cpp
-        ${CMAKE_SOURCE_DIR}/src/server/replication_dispatcher.cpp
-        ${CMAKE_SOURCE_DIR}/src/server/replication_state.cpp
-    )
-    target_link_libraries(miniredis_unit_tests Threads::Threads)
+    add_executable(miniredis_unit_tests tests/unit_tests.cpp)
+    target_link_libraries(miniredis_unit_tests PRIVATE miniredis_runtime)
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         target_compile_options(miniredis_unit_tests PRIVATE -UNDEBUG)
     endif()

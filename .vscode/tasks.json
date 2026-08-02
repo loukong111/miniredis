@@ -2,13 +2,15 @@
     "version": "2.0.0",
     "tasks": [
         {
-            "label": "cmake",
+            "label": "configure server",
             "type": "shell",
             "command": "cmake",
             "args": [
-                "-B", "build",
                 "-S", ".",
-                "-DCMAKE_CXX_COMPILER=g++-13"
+                "-B", "build",
+                "-DCMAKE_BUILD_TYPE=RelWithDebInfo",
+                "-DMINIREDIS_BUILD_QT_CONSOLE=OFF",
+                "-DCMAKE_CXX_COMPILER=/usr/bin/g++"
             ],
             "problemMatcher": [],
             "group": {
@@ -17,19 +19,20 @@
             }
         },
         {
-            "label": "make",
+            "label": "build server",
             "type": "shell",
-            "command": "make",
-            "args": [],
-            "options": {
-                "cwd": "${workspaceFolder}/build"
-            },
-            "problemMatcher": [],
+            "command": "cmake",
+            "args": [
+                "--build", "build",
+                "--target", "miniredis",
+                "--parallel"
+            ],
+            "problemMatcher": ["$gcc"],
             "group": {
                 "kind": "build",
                 "isDefault": true
             },
-            "dependsOn": ["cmake"]
+            "dependsOn": ["configure server"]
         }
     ]
 }

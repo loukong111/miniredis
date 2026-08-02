@@ -82,8 +82,11 @@ Qt Console 是项目的可视化演示入口，采用类似数据库客户端的
 ```bash
 cmake -S . -B build-qt \
   -DCMAKE_BUILD_TYPE=Release \
+  -DMINIREDIS_BUILD_SERVER=OFF \
+  -DMINIREDIS_BUILD_TESTS=OFF \
   -DMINIREDIS_BUILD_QT_CONSOLE=ON \
-  -DMINIREDIS_ENABLE_INTEGRATION_TESTS=OFF
+  -DMINIREDIS_ENABLE_INTEGRATION_TESTS=OFF \
+  -DCMAKE_CXX_COMPILER=/usr/bin/g++
 
 cmake --build build-qt -j
 ./build-qt/tools/qt_console/miniredis_qt_console

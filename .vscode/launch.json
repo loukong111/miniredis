@@ -1,12 +1,11 @@
 {
     "version": "0.2.0",
     "configurations": [
-        
         {
-            "name": "Debug miniredis",
+            "name": "Debug MiniRedis Server",
             "type": "cppdbg",
             "request": "launch",
-            "program": "${workspaceFolder}/build/miniredis_server",
+            "program": "${workspaceFolder}/build/miniredis",
             "args": [],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}",
@@ -20,7 +19,7 @@
                     "ignoreFailures": true
                 }
             ],
-            "preLaunchTask": "make",
+            "preLaunchTask": "build server",
             "miDebuggerPath": "/usr/bin/gdb"
         }
     ]

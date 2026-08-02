@@ -2,6 +2,7 @@
 #include "miniredis/platform/platform.hpp"
 #include "miniredis/server/config.hpp"
 #include "miniredis/server/server.hpp"
+
 #include <iostream>
 #include <utility>
 

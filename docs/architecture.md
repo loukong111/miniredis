@@ -2,19 +2,27 @@
 
 ## 项目结构
 
-MiniRedis 按职责分层：
+MiniRedis 将运行时代码、应用入口、测试和运维资源分开：
 
 ```text
-include/miniredis/
-├── core/          # KV 存储、内存池、线程池
-├── net/           # epoll 调度器、RESP 编解码
-├── persistence/   # 文件快照和持久化管理
-├── metrics/       # stats 统计和 HTTP 暴露
-├── cluster/       # Redis Cluster 风格 slot 路由和节点状态
-└── server/        # 配置解析、命令处理、服务启动编排
+include/miniredis/  # 对外头文件，目录与 src 中的实现对应
+src/
+├── app/            # 服务端程序入口
+├── core/           # KV 存储、内存池、线程池
+├── net/            # epoll 调度器、RESP 编解码
+├── persistence/    # snapshot、AOF 与持久化编排
+├── metrics/        # stats 统计和 HTTP 暴露
+├── cluster/        # slot 路由、拓扑与节点状态
+└── server/         # 配置、命令处理和服务生命周期
+tests/              # 单元测试与黑盒集成测试
+tools/qt_console/   # 可独立构建的跨平台管理端
+config/             # 开发与生产配置样例
+deploy/             # systemd、logrotate、安装和备份脚本
+scripts/            # 压测、恢复、复制与集群验证脚本
+docs/               # 架构、部署、运维与测试文档
 ```
 
-`main.cpp` 只保留入口逻辑：解析配置并启动 `MiniRedisServer`。命令处理集中在 `server/command_handler`，服务生命周期集中在 `server/server`。
+`src/app/main.cpp` 只保留入口逻辑：解析配置并启动 `MiniRedisServer`。公共实现编译为 `miniredis_runtime` 静态库，由服务端入口和单元测试复用；命令处理集中在 `server/command_handler`，服务生命周期集中在 `server/server`。
 
 ## 核心流程
 
