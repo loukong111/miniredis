@@ -1,4 +1,4 @@
-# 架构与持久化
+# 架构设计
 
 ## 项目结构
 
@@ -24,6 +24,17 @@ docs/               # 架构、部署、运维与测试文档
 
 `src/app/main.cpp` 只保留入口逻辑：解析配置并启动 `MiniRedisServer`。公共实现编译为 `miniredis_runtime` 静态库，由服务端入口和单元测试复用；命令处理集中在 `server/command_handler`，服务生命周期集中在 `server/server`。
 
+| 模块 | 职责与边界 |
+| :--- | :--- |
+| `core` | 内存中的 KV、TTL、内存额度及基础资源管理 |
+| `net` | epoll 调度和 RESP 编解码；`RespWriter::array` 统一编码复制与 AOF 命令 |
+| `persistence` | 文件格式、恢复和后台落盘，不承担客户端命令授权 |
+| `cluster` | slot 映射、拓扑存储和公共节点地址解析 |
+| `server` | 认证授权、命令语义、复制和服务生命周期；通过具名 `CommandContext` 注入可选依赖 |
+| `metrics` | 指标采集、快照和 HTTP 导出 |
+
+扩展命令时需同步处理命令元信息、权限、路由、AOF 和复制语义，并补充相应行为测试。源码按职责分层；可选 Qt 管理端保持独立，不链接 Linux runtime。
+
 ## 核心流程
 
 ```mermaid
@@ -47,20 +58,22 @@ flowchart LR
     Resp --> C
 ```
 
-```text
-listen socket
-  -> accept reactor
-  -> round-robin dispatch fd
-  -> worker reactor epoll
-  -> coroutine resume
-  -> RESP decode
-  -> CommandHandler
-  -> CacheStore / ClusterSlotMap / Stats
-  -> RESP encode
-  -> non-blocking write
-```
-
 网络层采用多 Reactor 模型：accept reactor 只负责监听 socket 和接收新连接，连接 fd 会按 round-robin 分发给 worker reactor。每个 worker reactor 拥有独立 `Scheduler`、epoll fd、eventfd 和 ready queue，客户端读写在对应 worker 线程内以 coroutine 方式执行。
+
+## 并发与生命周期
+
+| 共享状态 | 并发策略 |
+| :--- | :--- |
+| 客户端连接 | 每个 fd 由一个 worker reactor 驱动；连接内的解码器和会话状态不跨线程共享 |
+| CacheStore shard | 每个 shard 一把 `shared_mutex`；GET 需要更新 LRU、可能删除过期项，因此实际使用独占锁 |
+| 固定块内存池 | mutex 保护空闲链表；CacheStore 在覆盖、删除及过期时归还块 |
+| snapshot | 逐 shard 加共享锁复制存活数据，文件 IO 在锁外执行；后台任务用 `snapshot_running_` 防重入 |
+| AOF | mutex 串行保护追加和 rewrite buffer；rewrite 分批在锁外写临时文件，最终切换短暂持锁 |
+| 复制应用 | `replication_apply_mutex` 串行保护应用顺序与 offset 更新 |
+| ClusterSlotMap | 内部 mutex 保护映射和 epoch；外层锁保护迁移、接管等跨对象操作 |
+| Stats | 计数器使用 atomic，慢日志和节点地址使用 mutex；查询允许统计值略有滞后 |
+
+CacheStore 的 snapshot 和统计逐个遍历 shard，不能视为所有 shard 在同一时刻的原子视图。内存池只管理块复用，业务对象生命周期仍由 shard 锁保护。
 
 ## 核心不变量
 
@@ -131,7 +144,7 @@ sequenceDiagram
 ## 性能热路径
 
 ```text
-GET: epoll -> coroutine -> RESP parse -> ACL/route -> shard shared lock -> encode -> socket
+GET: epoll -> coroutine -> RESP parse -> ACL/route -> shard unique lock -> encode -> socket
 SET: epoll -> coroutine -> RESP parse -> ACL/route -> shard unique lock
      -> memory pool/heap -> optional AOF -> backlog publish -> encode -> socket
 ```
@@ -151,9 +164,10 @@ SET: epoll -> coroutine -> RESP parse -> ACL/route -> shard unique lock
 - 支持 TTL、惰性删除和后台 cleanup
 - `snapshot()` 只导出未过期 key，并保存 TTL key 的绝对过期时间
 - 支持 `maxmemory` payload 估算内存上限
-- 开启多 shard 时，`maxmemory` 会按 shard 均分为局部上限，避免单个 shard 抢占全部内存
+- 开启多 shard 时，`maxmemory` 按 shard 均分，余数字节分配给前面的 shard；额度为 0 的 shard 拒绝非空写入，全局 `maxmemory=0` 才表示不限额
+- `used_memory` 统计 key/value 字节数，不包含容器节点、协议缓冲、线程栈等进程内存；不能直接等同于 RSS
 - `noeviction` 策略在超限时拒绝写入
-- `lru` 策略在超限时淘汰最近最少访问 key
+- `lru` 策略在命中 shard 内扫描并淘汰最近最少访问 key；这是局部 LRU，扫描成本随 shard 大小增加
 
 ## 持久化
 
@@ -194,18 +208,10 @@ AOF 是可选增量日志，开启 `appendonly_file` 后，成功执行的 `SET`
 
 stats HTTP server 是轻量同步实现，面向健康检查和低频监控。请求读取会循环到 HTTP header 完整，响应写回会循环直到全部发送完成，并对过大的请求头返回 431。
 
-当前指标包括：
+指标覆盖命令数、命中率、连接及拒绝数、延迟、内存额度与淘汰、资源限制、快照、AOF rewrite 和复制状态。接口使用方式见 [使用指南](usage.md)，部署监控和排障见 [部署与运维](ops-runbook.md)。
 
-- total commands
-- GET hits / misses
-- hit rate
-- key count
-- used memory bytes / maxmemory bytes
-- evicted keys
-- memory pool used/free blocks
-- connected / total / rejected connections
-- command latency samples / avg / max
-- slowlog length / threshold / max length
-- resource protection limits：request/key/value/pipeline/output buffer/max clients
-- snapshot running / last success / last failure / duration / key count
-- AOF rewrite running / buffer bytes / last rewrite / duration / records / failures / last status / last error
+## 当前维护重点
+
+`command_handler.cpp`、`server.cpp` 和 Qt 的 `monitor_window.cpp` 仍承担较多职责。继续演进时，应按实际功能变更提取命令分组、复制生命周期和界面组件；暂时保留现有模块边界，避免仅为降低行数增加转发层和零散文件。
+
+并发与恢复验证统一见 [测试与压测](testing-benchmark.md)。复制选举约束见 [复制机制](replication.md)，slot 迁移约束见 [Cluster 模式](cluster.md)。

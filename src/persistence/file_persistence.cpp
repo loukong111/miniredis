@@ -211,6 +211,10 @@ bool loadSnapshotFile(const std::string& path, SnapshotData& out) {
 FilePersistence::FilePersistence(const std::string& filepath) : filepath_(filepath) {}
 
 bool FilePersistence::saveSnapshot(const SnapshotData& data) {
+    if (filepath_.empty()) {
+        MINIREDIS_LOG_ERROR("snapshot") << "snapshot path must not be empty";
+        return false;
+    }
     if (data.size() > kMaxSnapshotEntries) {
         MINIREDIS_LOG_ERROR("snapshot") << "snapshot has too many entries: " << data.size();
         return false;
@@ -231,6 +235,18 @@ bool FilePersistence::saveSnapshot(const SnapshotData& data) {
             return false;
         }
         encoded_size += kEntryHeaderBytes + payload_size;
+    }
+
+    const std::filesystem::path target(filepath_);
+    const std::filesystem::path parent = target.parent_path();
+    if (!parent.empty()) {
+        std::error_code ec;
+        std::filesystem::create_directories(parent, ec);
+        if (ec) {
+            MINIREDIS_LOG_ERROR("snapshot") << "failed to create snapshot directory "
+                                            << parent.string() << ": " << ec.message();
+            return false;
+        }
     }
 
     const std::string tmp_path = filepath_ + ".tmp";

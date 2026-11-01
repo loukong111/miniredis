@@ -14,6 +14,7 @@
 #include "miniredis/server/failover_coordinator.hpp"
 #include "miniredis/server/replication_state.hpp"
 #include <cassert>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
@@ -433,6 +434,26 @@ static void testConfigRejectsMalformedNumbers() {
     assert(port == 6366);
 }
 
+static void testConfigPreservesQuotedHashAndDefaultsSnapshotPath() {
+    const std::filesystem::path path = testPath("quoted_hash.conf");
+    {
+        std::ofstream ofs(path);
+        ofs << "requirepass = \"secret#with#hash\" # comment\n";
+    }
+
+    std::vector<std::string> args = {"miniredis", "--config", path.string(), "--port", "16381"};
+    std::vector<char*> argv;
+    argv.reserve(args.size());
+    for (auto& arg : args) argv.push_back(arg.data());
+
+    AppConfig config;
+    assert(parseConfig(static_cast<int>(argv.size()), argv.data(), config) == ConfigParseResult::Ok);
+    assert(config.requirepass == "secret#with#hash");
+    assert(config.snapshot_file == "snapshot_16381.dat");
+
+    std::filesystem::remove(path);
+}
+
 static void testCacheStore() {
     FixedMemoryPool pool(2);
     CacheStore cache(pool);
@@ -499,6 +520,60 @@ static void testCacheStoreMaxmemoryLru() {
     assert(cache.exists("c"));
     assert(cache.evicted_keys() == 1);
     assert(cache.used_memory_bytes() <= cache.max_memory_bytes());
+}
+
+static void testCacheStoreMaxmemoryAcrossShards() {
+    FixedMemoryPool pool(8);
+    CacheStore cache(pool, 3);
+    cache.configure_memory_limit(5, EvictionPolicy::NoEviction);
+
+    std::array<std::string, 3> keys;
+    for (int ch = 1; ch <= 255; ++ch) {
+        std::string key(1, static_cast<char>(ch));
+        const size_t shard = std::hash<std::string>{}(key) % keys.size();
+        if (keys[shard].empty()) keys[shard] = std::move(key);
+    }
+    for (const auto& key : keys) assert(!key.empty());
+
+    assert(cache.set(keys[0], "x") == SetResult::Ok);
+    assert(cache.set(keys[1], "x") == SetResult::Ok);
+    assert(cache.set(keys[2], "x") == SetResult::OutOfMemory);
+    assert(cache.used_memory_bytes() <= cache.max_memory_bytes());
+}
+
+static void testCacheStoreZeroBudgetShard() {
+    FixedMemoryPool pool(8);
+    CacheStore cache(pool, 3);
+    std::string key;
+    for (size_t i = 0; i < 1000; ++i) {
+        std::string candidate = "zero-budget-" + std::to_string(i);
+        if (std::hash<std::string>{}(candidate) % cache.shard_count() == 2) {
+            key = candidate;
+            break;
+        }
+    }
+    assert(!key.empty());
+
+    for (auto policy : {EvictionPolicy::NoEviction, EvictionPolicy::Lru}) {
+        cache.configure_memory_limit(1, policy);
+        assert(cache.set(key, "v") == SetResult::OutOfMemory);
+        assert(cache.set_if_absent(key, "v").status == SetResult::OutOfMemory);
+        assert(cache.append(key, "v").status == SetResult::OutOfMemory);
+        assert(cache.increment(key, 1).code == IncrementResultCode::OutOfMemory);
+        cache.load_snapshot({{key, SnapshotEntry{"v", 0}}});
+        assert(!cache.exists(key));
+        assert(cache.used_memory_bytes() == 0);
+    }
+
+    cache.configure_memory_limit(0, EvictionPolicy::NoEviction);
+    assert(cache.set(key, "v") == SetResult::Ok);
+    cache.configure_memory_limit(1, EvictionPolicy::Lru);
+    assert(!cache.exists(key));
+
+    CacheStore single_shard(pool);
+    assert(single_shard.set("", "1234") == SetResult::Ok);
+    single_shard.configure_memory_limit(1, EvictionPolicy::Lru);
+    assert(!single_shard.exists(""));
 }
 
 static void testCacheStoreLazyExpiration() {
@@ -575,6 +650,20 @@ static void testFilePersistence() {
 
     std::filesystem::remove(path);
     std::filesystem::remove(path.string() + ".tmp");
+}
+
+static void testFilePersistenceCreatesParentDirectory() {
+    const std::filesystem::path path = testPath("nested/snapshots/snapshot.dat");
+    FilePersistence persistence(path.string());
+    SnapshotData input;
+    input["key"] = SnapshotEntry{"value", 0};
+
+    assert(persistence.saveSnapshot(input));
+    assert(std::filesystem::exists(path));
+
+    SnapshotData output;
+    assert(persistence.loadSnapshot(output));
+    assert(output == input);
 }
 
 static void testFilePersistenceLoadsV1Snapshot() {
@@ -876,7 +965,10 @@ static void testCommandHandlerWritesAof() {
     AppConfig config;
     AppendOnlyFile aof(path.string(), AppendFsyncPolicy::Always);
     assert(aof.open());
-    CommandHandler handler(cache, pool, config, false, "127.0.0.1:6366", nullptr, nullptr, &aof);
+    CommandHandler handler(cache, pool, config, {
+        .current_node = "127.0.0.1:6366",
+        .aof = &aof,
+    });
     bool authenticated = true;
 
     assert(handler.handle(command({"SET", "a", "one"}), authenticated) ==
@@ -908,7 +1000,10 @@ static void testCommandHandlerRewriteAof() {
     AppConfig config;
     AppendOnlyFile aof(path.string(), AppendFsyncPolicy::Always);
     assert(aof.open());
-    CommandHandler handler(cache, pool, config, false, "127.0.0.1:6366", nullptr, nullptr, &aof);
+    CommandHandler handler(cache, pool, config, {
+        .current_node = "127.0.0.1:6366",
+        .aof = &aof,
+    });
     bool authenticated = true;
 
     assert(handler.handle(command({"SET", "a", "one"}), authenticated) ==
@@ -934,7 +1029,9 @@ static void testCommandHandlerRewriteAof() {
     assert(data.size() == 1);
     assert(data["a"].value == "two");
 
-    CommandHandler no_aof_handler(cache, pool, config, false, "127.0.0.1:6366", nullptr, nullptr, nullptr);
+    CommandHandler no_aof_handler(cache, pool, config, {
+        .current_node = "127.0.0.1:6366",
+    });
     assert(no_aof_handler.handle(command({"BGREWRITEAOF"}), authenticated) ==
            RespWriter::error("AOF is not enabled"));
 
@@ -1179,7 +1276,12 @@ static void testClusterCommands() {
     slot_map.Rebuild({"127.0.0.1:6366", "127.0.0.1:6367"});
     std::mutex slot_map_mutex;
 
-    CommandHandler handler(cache, pool, config, true, "127.0.0.1:6366", &slot_map, &slot_map_mutex);
+    CommandHandler handler(cache, pool, config, {
+        .cluster_mode = true,
+        .current_node = "127.0.0.1:6366",
+        .slot_map = &slot_map,
+        .slot_map_mutex = &slot_map_mutex,
+    });
     bool authenticated = true;
 
     std::string keyslot = handler.handle(command({"CLUSTER", "KEYSLOT", "foo{bar}1"}), authenticated);
@@ -1298,9 +1400,13 @@ static void testClusterManualFailoverTakeover() {
     std::mutex slot_map_mutex;
     bool cluster_changed = false;
 
-    CommandHandler handler(cache, pool, config, true, replica_node,
-                           &slot_map, &slot_map_mutex, nullptr,
-                           [&cluster_changed]() { cluster_changed = true; });
+    CommandHandler handler(cache, pool, config, {
+        .cluster_mode = true,
+        .current_node = replica_node,
+        .slot_map = &slot_map,
+        .slot_map_mutex = &slot_map_mutex,
+        .cluster_change_callback = [&cluster_changed]() { cluster_changed = true; },
+    });
     bool authenticated = true;
 
     assert(handler.handle(command({"SET", "before-failover", "blocked"}), authenticated) ==
@@ -1341,8 +1447,12 @@ static void testClusterManualFailoverTakeover() {
     ClusterSlotMap master_slot_map;
     master_slot_map.Rebuild({master_node, replica_node});
     std::mutex master_slot_map_mutex;
-    CommandHandler master_handler(master_cache, master_pool, master_config, true, master_node,
-                                  &master_slot_map, &master_slot_map_mutex);
+    CommandHandler master_handler(master_cache, master_pool, master_config, {
+        .cluster_mode = true,
+        .current_node = master_node,
+        .slot_map = &master_slot_map,
+        .slot_map_mutex = &master_slot_map_mutex,
+    });
     bool master_authenticated = true;
     assert(master_handler.handle(command({"CLUSTER", "FAILOVER", "TAKEOVER"}), master_authenticated) ==
            RespWriter::error("CLUSTER FAILOVER is only supported on replicas"));
@@ -1355,9 +1465,12 @@ static void testClusterManualFailoverTakeover() {
     ClusterSlotMap automatic_slot_map;
     automatic_slot_map.Rebuild({master_node, replica_node});
     std::mutex automatic_slot_map_mutex;
-    CommandHandler automatic_handler(automatic_cache, automatic_pool, automatic_config, true,
-                                     replica_node, &automatic_slot_map,
-                                     &automatic_slot_map_mutex);
+    CommandHandler automatic_handler(automatic_cache, automatic_pool, automatic_config, {
+        .cluster_mode = true,
+        .current_node = replica_node,
+        .slot_map = &automatic_slot_map,
+        .slot_map_mutex = &automatic_slot_map_mutex,
+    });
     bool automatic_authenticated = true;
     assert(automatic_handler.handle(command({"CLUSTER", "FAILOVER", "TAKEOVER"}),
                                     automatic_authenticated) ==
@@ -1386,7 +1499,12 @@ static void testMovedCountsAsCommand() {
     }
     assert(!moved_key.empty());
 
-    CommandHandler handler(cache, pool, config, true, current_node, &slot_map, &slot_map_mutex);
+    CommandHandler handler(cache, pool, config, {
+        .cluster_mode = true,
+        .current_node = current_node,
+        .slot_map = &slot_map,
+        .slot_map_mutex = &slot_map_mutex,
+    });
     bool authenticated = true;
     size_t before = Stats::instance().totalCommands();
     std::string response = handler.handle(command({"GET", moved_key}), authenticated);
@@ -1413,7 +1531,12 @@ static void testClusterRoutesBySlot() {
     std::string expected_target = slot_map.GetNodeForSlot(slot);
     assert(!expected_target.empty());
 
-    CommandHandler handler(cache, pool, config, true, current_node, &slot_map, &slot_map_mutex);
+    CommandHandler handler(cache, pool, config, {
+        .cluster_mode = true,
+        .current_node = current_node,
+        .slot_map = &slot_map,
+        .slot_map_mutex = &slot_map_mutex,
+    });
     bool authenticated = true;
     std::string response_a = handler.handle(command({"GET", key_a}), authenticated);
     std::string response_b = handler.handle(command({"GET", key_b}), authenticated);
@@ -1437,7 +1560,12 @@ static void testClusterImportingAllowsMigrationWrites() {
     uint16_t slot = clusterHashSlot(key);
     assert(slot_map.SetSlotOwner(slot, source_node));
 
-    CommandHandler handler(cache, pool, config, true, current_node, &slot_map, &slot_map_mutex);
+    CommandHandler handler(cache, pool, config, {
+        .cluster_mode = true,
+        .current_node = current_node,
+        .slot_map = &slot_map,
+        .slot_map_mutex = &slot_map_mutex,
+    });
     CommandSession session;
     session.authenticated = true;
     std::string moved = handler.handle(command({"SET", key, "before"}), session);
@@ -1478,7 +1606,12 @@ static void testClusterMigratingReturnsAsk() {
     }
     assert(!key.empty());
 
-    CommandHandler handler(cache, pool, config, true, current_node, &slot_map, &slot_map_mutex);
+    CommandHandler handler(cache, pool, config, {
+        .cluster_mode = true,
+        .current_node = current_node,
+        .slot_map = &slot_map,
+        .slot_map_mutex = &slot_map_mutex,
+    });
     bool authenticated = true;
     uint16_t slot = clusterHashSlot(key);
     std::string response = handler.handle(command({"GET", key}), authenticated);
@@ -1491,7 +1624,9 @@ static void testAuthFlow() {
     CacheStore cache(pool);
     AppConfig config;
     config.requirepass = "secret";
-    CommandHandler handler(cache, pool, config, false, "127.0.0.1:6366", nullptr, nullptr);
+    CommandHandler handler(cache, pool, config, {
+        .current_node = "127.0.0.1:6366",
+    });
 
     bool authenticated = false;
     assert(handler.handle(command({"PING"}), authenticated) ==
@@ -1499,6 +1634,10 @@ static void testAuthFlow() {
     assert(!authenticated);
 
     assert(handler.handle(command({"AUTH", "bad"}), authenticated) ==
+           RespWriter::error("invalid password"));
+    assert(!authenticated);
+
+    assert(handler.handle(command({"AUTH", "secret" + std::string(256, '\0')}), authenticated) ==
            RespWriter::error("invalid password"));
     assert(!authenticated);
 
@@ -1545,7 +1684,9 @@ static void testAclRoles() {
     disabled.role = AclRole::Admin;
     disabled.enabled = false;
     config.acl_users.push_back(disabled);
-    CommandHandler handler(cache, pool, config, false, "127.0.0.1:6366", nullptr, nullptr);
+    CommandHandler handler(cache, pool, config, {
+        .current_node = "127.0.0.1:6366",
+    });
 
     CommandSession session;
     assert(handler.handle(command({"PING"}), session) ==
@@ -1624,7 +1765,9 @@ static void testCommandResourceLimits() {
     AppConfig config;
     config.max_key_bytes = 3;
     config.max_value_bytes = 4;
-    CommandHandler handler(cache, pool, config, false, "127.0.0.1:6366", nullptr, nullptr);
+    CommandHandler handler(cache, pool, config, {
+        .current_node = "127.0.0.1:6366",
+    });
     bool authenticated = true;
 
     assert(handler.handle(command({"SET", "abcd", "v"}), authenticated) ==
@@ -1645,7 +1788,9 @@ static void testCommandResourceLimits() {
     AppConfig replica_config;
     replica_config.max_key_bytes = 3;
     replica_config.max_value_bytes = 4;
-    CommandHandler replica_handler(cache, pool, replica_config, false, "127.0.0.1:6367", nullptr, nullptr);
+    CommandHandler replica_handler(cache, pool, replica_config, {
+        .current_node = "127.0.0.1:6367",
+    });
     assert(replica_handler.handle(command({"REPLSET", "abc", "12345", "0"}), authenticated) ==
            RespWriter::error("value too large"));
 }
@@ -1654,7 +1799,9 @@ static void testCommandSetExAndTtl() {
     FixedMemoryPool pool(4);
     CacheStore cache(pool);
     AppConfig config;
-    CommandHandler handler(cache, pool, config, false, "127.0.0.1:6366", nullptr, nullptr);
+    CommandHandler handler(cache, pool, config, {
+        .current_node = "127.0.0.1:6366",
+    });
     bool authenticated = true;
 
     assert(handler.handle(command({"TTL", "missing"}), authenticated) == ":-2\r\n");
@@ -1679,7 +1826,9 @@ static void testCommandExpireAndMget() {
     FixedMemoryPool pool(8);
     CacheStore cache(pool);
     AppConfig config;
-    CommandHandler handler(cache, pool, config, false, "127.0.0.1:6366", nullptr, nullptr);
+    CommandHandler handler(cache, pool, config, {
+        .current_node = "127.0.0.1:6366",
+    });
     bool authenticated = true;
 
     assert(handler.handle(command({"SET", "k1", "one"}), authenticated) ==
@@ -1711,7 +1860,9 @@ static void testCommandStringOps() {
     FixedMemoryPool pool(64);
     CacheStore cache(pool);
     AppConfig config;
-    CommandHandler handler(cache, pool, config, false, "127.0.0.1:6366", nullptr, nullptr);
+    CommandHandler handler(cache, pool, config, {
+        .current_node = "127.0.0.1:6366",
+    });
     bool authenticated = true;
 
     assert(handler.handle(command({"SETNX", "n", "1"}), authenticated) == ":1\r\n");
@@ -1780,7 +1931,9 @@ static void testCommandSetMaxmemoryOom() {
     CacheStore cache(pool);
     cache.configure_memory_limit(8, EvictionPolicy::NoEviction);
     AppConfig config;
-    CommandHandler handler(cache, pool, config, false, "127.0.0.1:6366", nullptr, nullptr);
+    CommandHandler handler(cache, pool, config, {
+        .current_node = "127.0.0.1:6366",
+    });
     bool authenticated = true;
 
     assert(handler.handle(command({"SET", "a", "123"}), authenticated) ==
@@ -1799,7 +1952,9 @@ static void testCommandInfo() {
     config.eviction_policy = "lru";
     config.snapshot_file = "snapshot_test.dat";
     config.snapshot_interval_sec = 30;
-    CommandHandler handler(cache, pool, config, false, "127.0.0.1:6366", nullptr, nullptr);
+    CommandHandler handler(cache, pool, config, {
+        .current_node = "127.0.0.1:6366",
+    });
     bool authenticated = true;
 
     assert(handler.handle(command({"SET", "info-key", "value"}), authenticated) ==
@@ -1846,7 +2001,9 @@ static void testCommandReplication() {
     CacheStore cache(pool);
     AppConfig config;
     config.replicaof = "127.0.0.1:6366";
-    CommandHandler handler(cache, pool, config, false, "127.0.0.1:6367", nullptr, nullptr);
+    CommandHandler handler(cache, pool, config, {
+        .current_node = "127.0.0.1:6367",
+    });
     bool authenticated = true;
 
     assert(handler.handle(command({"SET", "client-write", "blocked"}), authenticated) ==
@@ -1893,15 +2050,48 @@ static void testCommandReplication() {
     assert(repl_info.find("master_node:127.0.0.1:6366") != std::string::npos);
 }
 
+static void testReplicationPreservesMillisecondTtl() {
+    FixedMemoryPool pool(8);
+    CacheStore cache(pool);
+    AppConfig config;
+    ReplicationBacklog backlog(8);
+    const std::string replid(kReplicationIdLength, 'd');
+    CommandHandler handler(cache, pool, config, {
+        .current_node = "127.0.0.1:6366",
+        .replication_backlog = &backlog,
+        .local_replid = &replid,
+    });
+    bool authenticated = true;
+
+    assert(handler.handle(command({"SET", "ttl:key", "value"}), authenticated) ==
+           RespWriter::simpleString("OK"));
+    assert(handler.handle(command({"PEXPIRE", "ttl:key", "123"}), authenticated) == ":1\r\n");
+    assert(handler.handle(command({"GETEX", "ttl:key", "PX", "77"}), authenticated) ==
+           RespWriter::bulkString("value"));
+
+    std::vector<ReplicationBacklogEntry> entries;
+    assert(backlog.entriesAfter(0, entries));
+    assert(entries.size() == 3);
+    assert(entries[1].command == std::vector<std::string>({"REPLPEXPIRE", "ttl:key", "123"}));
+    assert(entries[2].command == std::vector<std::string>({"REPLPEXPIRE", "ttl:key", "77"}));
+
+    assert(handler.handle(command({"REPLPEXPIRE", "ttl:key", "25"}), authenticated) ==
+           RespWriter::simpleString("OK"));
+    const long long ttl = cache.pttl("ttl:key");
+    assert(ttl > 0 && ttl <= 25);
+}
+
 static void testAutomaticFailoverWriteFence() {
     FixedMemoryPool pool(8);
     CacheStore cache(pool);
     AppConfig config;
     std::atomic<bool> primary{true};
     std::atomic<bool> writes_allowed{false};
-    CommandHandler handler(cache, pool, config, false, "127.0.0.1:6366", nullptr,
-                           nullptr, nullptr, {}, nullptr, nullptr, {}, nullptr,
-                           nullptr, {}, nullptr, nullptr, &primary, &writes_allowed);
+    CommandHandler handler(cache, pool, config, {
+        .current_node = "127.0.0.1:6366",
+        .primary_state = &primary,
+        .writes_allowed = &writes_allowed,
+    });
     bool authenticated = true;
 
     assert(handler.handle(command({"GET", "ha:key"}), authenticated) ==
@@ -1969,13 +2159,19 @@ static void testCommandReplicationBacklogPsync() {
     const std::string restarted_master_replid(kReplicationIdLength, 'b');
     const std::string replica_local_replid(kReplicationIdLength, 'c');
     std::string upstream_replid = master_replid;
-    CommandHandler master(cache, pool, config, false, "127.0.0.1:6366", nullptr, nullptr,
-                          nullptr, {}, &backlog, nullptr, {}, nullptr, nullptr, {},
-                          &master_replid);
-    CommandHandler replica(cache, pool, replica_config, false, "127.0.0.1:6367", nullptr, nullptr,
-                           nullptr, {}, nullptr, &replica_offset,
-                           [&](uint64_t offset) { persisted_offset = offset; }, nullptr,
-                           &replication_mutex, {}, &replica_local_replid, &upstream_replid);
+    CommandHandler master(cache, pool, config, {
+        .current_node = "127.0.0.1:6366",
+        .replication_backlog = &backlog,
+        .local_replid = &master_replid,
+    });
+    CommandHandler replica(cache, pool, replica_config, {
+        .current_node = "127.0.0.1:6367",
+        .replication_offset = &replica_offset,
+        .replication_offset_callback = [&](uint64_t offset) { persisted_offset = offset; },
+        .replication_apply_mutex = &replication_mutex,
+        .local_replid = &replica_local_replid,
+        .upstream_replid = &upstream_replid,
+    });
     bool authenticated = true;
 
     assert(master.handle(command({"SET", "repl:one", "1"}), authenticated) ==
@@ -2033,9 +2229,11 @@ static void testCommandReplicationBacklogPsync() {
     assert(parsed->array[2].integer == 2);
     assert(parsed->array[3].type == RespType::ARRAY);
 
-    CommandHandler restarted_master(cache, pool, config, false, "127.0.0.1:6366",
-                                    nullptr, nullptr, nullptr, {}, &backlog, nullptr, {},
-                                    nullptr, nullptr, {}, &restarted_master_replid);
+    CommandHandler restarted_master(cache, pool, config, {
+        .current_node = "127.0.0.1:6366",
+        .replication_backlog = &backlog,
+        .local_replid = &restarted_master_replid,
+    });
     std::string identity_mismatch = restarted_master.handle(
         command({"REPLPSYNC", master_replid, "2"}), authenticated);
     RespDecoder mismatch_decoder;
@@ -2056,7 +2254,9 @@ static void testCommandSlowLog() {
     FixedMemoryPool pool(4);
     CacheStore cache(pool);
     AppConfig config;
-    CommandHandler handler(cache, pool, config, false, "127.0.0.1:6366", nullptr, nullptr);
+    CommandHandler handler(cache, pool, config, {
+        .current_node = "127.0.0.1:6366",
+    });
     bool authenticated = true;
 
     Stats::instance().resetSlowLog();
@@ -2096,7 +2296,9 @@ static void testCommandMetadata() {
     FixedMemoryPool pool(4);
     CacheStore cache(pool);
     AppConfig config;
-    CommandHandler handler(cache, pool, config, false, "127.0.0.1:6366", nullptr, nullptr);
+    CommandHandler handler(cache, pool, config, {
+        .current_node = "127.0.0.1:6366",
+    });
     bool authenticated = true;
 
     std::string count_response = handler.handle(command({"COMMAND", "COUNT"}), authenticated);
@@ -2291,9 +2493,11 @@ static void testStatsReadinessExport() {
     Stats::instance().setReplicationState(2, 1, 10, 8, 2, 3, 4, 5);
     Stats::instance().setFailoverState(true, 3, 2, 2, 7, 7, true, false);
     Stats::instance().recordFailoverElection();
+    Stats::instance().setNodeAddr("node\"with\\escape");
     std::string json = Stats::instance().toJson();
     std::string metrics = Stats::instance().toPrometheus();
     assert(json.find("\"ready\":false") != std::string::npos);
+    assert(json.find("\"node_addr\":\"node\\\"with\\\\escape\"") != std::string::npos);
     assert(json.find("\"io_threads\":") != std::string::npos);
     assert(json.find("\"max_request_bytes\":1024") != std::string::npos);
     assert(json.find("\"snapshot_last_key_count\":3") != std::string::npos);
@@ -2323,6 +2527,7 @@ static void testStatsReadinessExport() {
     assert(json.find("\"ready\":true") != std::string::npos);
     assert(metrics.find("miniredis_ready 1") != std::string::npos);
     Stats::instance().setReady(false);
+    Stats::instance().setNodeAddr("");
 }
 
 int main() {
@@ -2337,14 +2542,18 @@ int main() {
     testConfigFileParsingAndPrecedence();
     testConfigRejectsRemoteBindWithoutAuth();
     testConfigRejectsMalformedNumbers();
+    testConfigPreservesQuotedHashAndDefaultsSnapshotPath();
     testCacheStore();
     testCacheStoreShards();
     testCacheStoreMaxmemoryNoEviction();
     testCacheStoreMaxmemoryLru();
+    testCacheStoreMaxmemoryAcrossShards();
+    testCacheStoreZeroBudgetShard();
     testCacheStoreLazyExpiration();
     testCacheStoreTtlCleanup();
     testCacheStoreTtlQuery();
     testFilePersistence();
+    testFilePersistenceCreatesParentDirectory();
     testFilePersistenceLoadsV1Snapshot();
     testFilePersistenceRejectsHugeCount();
     testFilePersistenceBackupRecovery();
@@ -2377,6 +2586,7 @@ int main() {
     testCommandSetMaxmemoryOom();
     testCommandInfo();
     testCommandReplication();
+    testReplicationPreservesMillisecondTtl();
     testAutomaticFailoverWriteFence();
     testReplicationStateFile();
     testCommandReplicationBacklogPsync();

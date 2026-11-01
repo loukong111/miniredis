@@ -27,7 +27,7 @@ struct RespValue {
 // RESP 解码器（增量式，处理半包）
 class RespDecoder {
 public:
-    //在这里，feed 会把 string_view 里的内容追加到自己的 buffer_，所以调用方不用构造完整 std::string
+    // Copies input into the decoder; the caller retains ownership of the source buffer.
     void feed(std::string_view data);
 
     std::optional<RespValue> parse();

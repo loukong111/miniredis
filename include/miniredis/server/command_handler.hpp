@@ -29,26 +29,33 @@ struct CommandSession {
     std::vector<std::string> key_prefixes;
 };
 
+// Non-owning dependencies must outlive the handler. Callbacks run on IO worker threads.
+struct CommandContext {
+    bool cluster_mode = false;
+    std::string current_node{};
+    ClusterSlotMap* slot_map = nullptr;
+    std::mutex* slot_map_mutex = nullptr;
+    AppendOnlyFile* aof = nullptr;
+    std::function<void()> cluster_change_callback{};
+    ReplicationBacklog* replication_backlog = nullptr;
+    std::atomic<uint64_t>* replication_offset = nullptr;
+    std::function<void(uint64_t)> replication_offset_callback{};
+    ReplicationDispatcher* replication_dispatcher = nullptr;
+    std::mutex* replication_apply_mutex = nullptr;
+    std::function<void()> replica_promoted_callback{};
+    const std::string* local_replid = nullptr;
+    std::string* upstream_replid = nullptr;
+    std::atomic<bool>* primary_state = nullptr;
+    std::atomic<bool>* writes_allowed = nullptr;
+    std::function<std::string()> active_master_callback{};
+    std::function<std::string(const RespValue&)> failover_command_callback{};
+    std::function<std::string()> failover_info_callback{};
+};
+
 class CommandHandler {
 public:
-    CommandHandler(CacheStore& cache, FixedMemoryPool& memory_pool, const AppConfig& config,
-                   bool cluster_mode, std::string current_node,
-                   ClusterSlotMap* slot_map, std::mutex* slot_map_mutex,
-                   AppendOnlyFile* aof = nullptr,
-                   std::function<void()> cluster_change_callback = {},
-                   ReplicationBacklog* replication_backlog = nullptr,
-                   std::atomic<uint64_t>* replication_offset = nullptr,
-                   std::function<void(uint64_t)> replication_offset_callback = {},
-                   ReplicationDispatcher* replication_dispatcher = nullptr,
-                   std::mutex* replication_apply_mutex = nullptr,
-                   std::function<void()> replica_promoted_callback = {},
-                   const std::string* local_replid = nullptr,
-                   std::string* upstream_replid = nullptr,
-                   std::atomic<bool>* primary_state = nullptr,
-                   std::atomic<bool>* writes_allowed = nullptr,
-                   std::function<std::string()> active_master_callback = {},
-                   std::function<std::string(const RespValue&)> failover_command_callback = {},
-                   std::function<std::string()> failover_info_callback = {});
+    CommandHandler(CacheStore& cache, FixedMemoryPool& memory_pool,
+                   const AppConfig& config, CommandContext context);
 
     std::string handle(const RespValue& cmd, CommandSession& session);
     std::string handle(const RespValue& cmd, bool& authenticated);
@@ -78,25 +85,7 @@ private:
     CacheStore& cache_;
     FixedMemoryPool& memory_pool_;
     const AppConfig& config_;
-    bool cluster_mode_;
-    std::string current_node_;
-    ClusterSlotMap* slot_map_;
-    std::mutex* slot_map_mutex_;
-    AppendOnlyFile* aof_;
-    std::function<void()> cluster_change_callback_;
-    ReplicationBacklog* replication_backlog_;
-    std::atomic<uint64_t>* replication_offset_;
-    std::function<void(uint64_t)> replication_offset_callback_;
-    ReplicationDispatcher* replication_dispatcher_;
-    std::mutex* replication_apply_mutex_;
-    std::function<void()> replica_promoted_callback_;
-    const std::string* local_replid_;
-    std::string* upstream_replid_;
-    std::atomic<bool>* primary_state_;
-    std::atomic<bool>* writes_allowed_;
-    std::function<std::string()> active_master_callback_;
-    std::function<std::string(const RespValue&)> failover_command_callback_;
-    std::function<std::string()> failover_info_callback_;
+    CommandContext context_;
     std::atomic<bool> promoted_to_master_{false};
 };
 

@@ -37,9 +37,7 @@ install -m 0644 "${ROOT_DIR}/deploy/logrotate/miniredis" "${STAGE_DIR}/deploy/lo
 install -m 0755 "${ROOT_DIR}/scripts/recovery_soak.sh" "${STAGE_DIR}/scripts/recovery_soak.sh"
 install -m 0755 "${ROOT_DIR}/scripts/resource_failure_soak.sh" "${STAGE_DIR}/scripts/resource_failure_soak.sh"
 install -m 0644 "${ROOT_DIR}/README.md" "${STAGE_DIR}/README.md"
-install -m 0644 "${ROOT_DIR}/docs/production-deploy.md" "${STAGE_DIR}/docs/production-deploy.md"
-install -m 0644 "${ROOT_DIR}/docs/ops-runbook.md" "${STAGE_DIR}/docs/ops-runbook.md"
-install -m 0644 "${ROOT_DIR}/docs/usage.md" "${STAGE_DIR}/docs/usage.md"
+cp -R "${ROOT_DIR}/docs/." "${STAGE_DIR}/docs/"
 
 cat >"${STAGE_DIR}/VERSION" <<EOF
 version=${VERSION}

@@ -349,7 +349,7 @@ std::string Stats::toJson() const {
     StatsSnapshot snap = snapshot();
     std::ostringstream oss;
     oss << "{";
-    oss << "\"node_addr\":\"" << snap.node_addr << "\",";
+    oss << "\"node_addr\":\"" << jsonEscape(snap.node_addr) << "\",";
     oss << "\"total_commands\":" << snap.total_commands << ",";
     oss << "\"get_hits\":" << snap.get_hits << ",";
     oss << "\"get_misses\":" << snap.get_misses << ",";

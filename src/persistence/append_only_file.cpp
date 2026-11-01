@@ -161,7 +161,7 @@ bool AppendOnlyFile::appendPExpire(const std::string& key, int64_t ttl_ms) {
 }
 
 bool AppendOnlyFile::appendCommand(const std::vector<std::string>& parts) {
-    std::string encoded = encodeCommand(parts);
+    std::string encoded = RespWriter::array(parts);
     std::lock_guard<std::mutex> lock(mutex_);
     if (fd_ < 0) {
         MINIREDIS_LOG_ERROR("aof") << "AOF is not open";
@@ -236,16 +236,6 @@ uint64_t AppendOnlyFile::currentUnixMillis() {
 uint64_t AppendOnlyFile::expireAtMillis(int ttl_seconds) {
     return currentUnixMillis() +
            static_cast<uint64_t>(ttl_seconds) * static_cast<uint64_t>(1000);
-}
-
-std::string AppendOnlyFile::encodeCommand(const std::vector<std::string>& parts) {
-    std::string out = "*" + std::to_string(parts.size()) + "\r\n";
-    for (const auto& part : parts) {
-        out += "$" + std::to_string(part.size()) + "\r\n";
-        out += part;
-        out += "\r\n";
-    }
-    return out;
 }
 
 bool AppendOnlyFile::applyCommand(const std::vector<std::string>& parts, SnapshotData& data) {
@@ -499,7 +489,7 @@ void AppendOnlyFile::runRewrite(SnapshotData data) {
             parts.push_back("PXAT");
             parts.push_back(std::to_string(entry.expire_at_ms));
         }
-        if (!writeAllToFd(tmp_fd, encodeCommand(parts))) {
+        if (!writeAllToFd(tmp_fd, RespWriter::array(parts))) {
             ok = false;
             break;
         }

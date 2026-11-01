@@ -13,7 +13,7 @@ MiniRedis 提供轻量主从复制和小规模自动故障转移，用于内网�
 - 每个 replica 由独立后台 worker 维护长连接，通过 `REPLACK <replid>` 校验身份并获取已应用 offset，再按序发送 `REPLAPPLY <replid> <offset> ...`
 - replica 校验 offset 连续性：重复投递按幂等成功处理，出现缺口时返回 `REPLGAP`，随后由周期 `REPLPSYNC` 追平
 - replica 会拒绝旧 master 连接发来的 `REPLACK/REPLAPPLY`；主节点重启后即使新旧 offset 数值相同，也必须先完成全量同步
-- replica 拒绝普通客户端写命令，但接受 master 发来的 `REPLAPPLY`、`REPLSET`、`REPLDEL`、`REPLEXPIRE`
+- replica 拒绝普通客户端写命令，但接受 master 发来的 `REPLAPPLY`、`REPLSET`、`REPLDEL`、`REPLEXPIRE`、`REPLPEXPIRE`
 - replica 如果启用 AOF，会把复制过来的写入也落到本地 AOF；启动全量同步后会触发一次本地 AOF rewrite
 - 副本状态使用临时文件、`fsync` 和 `rename` 原子保存到 `<snapshot-file>.repl.state`；旧版 `.repl.offset` 可读取，但因缺少 ID 会安全地强制全量同步一次
 - cluster 模式下 replica 可通过 `CLUSTER FAILOVER TAKEOVER` 手动晋升并接管原 master slots
@@ -83,7 +83,7 @@ scripts/failover_demo.sh smoke
 
 脚本启动一个 master 和两个 replica，验证初始复制、master 宕机、多数派选主、新主写入、旧主重启降级与追平，以及 stale master 写隔离。
 
-生产式演示中三个节点必须使用相同的 `--requirepass`，该口令也用于节点间 `REPLFAILOVER` 和复制链路认证。若启用了 ACL 但没有共享 `requirepass`，服务会拒绝以自动故障转移模式启动。
+启用认证的节点组中三个节点必须使用相同的 `--requirepass`，该口令也用于节点间 `REPLFAILOVER` 和复制链路认证。若启用了 ACL 但没有共享 `requirepass`，服务会拒绝以自动故障转移模式启动。
 
 手动故障接管仍可用于运维演示：
 

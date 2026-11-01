@@ -107,12 +107,15 @@ private:
 
     Shard& shard_for(const std::string& key);
     const Shard& shard_for(const std::string& key) const;
+    size_t shard_index_for(const std::string& key) const;
     size_t entry_memory(const std::string& key, const CacheEntry& entry) const;
     void erase_entry(Shard& shard, std::unordered_map<std::string, CacheEntry>::iterator it);
     size_t cleanup_expired_locked(Shard& shard);
-    bool evict_lru_until_fits(Shard& shard, const std::string& protected_key,
-                              size_t required_bytes);
-    size_t shard_memory_limit() const;
+    bool reserve_memory(Shard& shard, size_t shard_index, const std::string& key,
+                        size_t old_memory, size_t new_memory);
+    bool evict_lru_until_fits(Shard& shard, const std::string* protected_key,
+                             size_t required_bytes, size_t memory_limit);
+    std::optional<size_t> shard_memory_limit(size_t shard_index) const;
 
     FixedMemoryPool& pool_;
     std::vector<std::unique_ptr<Shard>> shards_;

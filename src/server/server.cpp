@@ -1,5 +1,6 @@
 #include "miniredis/server/server.hpp"
 #include "miniredis/cluster/cluster_config_store.hpp"
+#include "miniredis/cluster/cluster_utils.hpp"
 #include "miniredis/core/logger.hpp"
 #include "miniredis/metrics/http_stats.hpp"
 #include "miniredis/metrics/stats.hpp"
@@ -48,16 +49,6 @@ bool wouldBlock() {
     return errno == EAGAIN || errno == EWOULDBLOCK;
 }
 
-bool splitNodeAddr(const std::string& node, std::string& host, int& port) {
-    size_t pos = node.rfind(':');
-    if (pos == std::string::npos || pos == 0 || pos + 1 >= node.size()) return false;
-    host = node.substr(0, pos);
-    const std::string_view port_text(node.data() + pos + 1, node.size() - pos - 1);
-    auto [ptr, ec] = std::from_chars(port_text.data(), port_text.data() + port_text.size(), port);
-    return ec == std::errc() && ptr == port_text.data() + port_text.size() &&
-           port > 0 && port <= 65535;
-}
-
 std::vector<std::string> splitReplicaNodes(const std::string& nodes) {
     std::vector<std::string> result;
     std::unordered_set<std::string> seen;
@@ -77,15 +68,6 @@ std::vector<std::string> splitReplicaNodes(const std::string& nodes) {
         start = end + 1;
     }
     return result;
-}
-
-std::string encodeRespCommand(const std::vector<std::string>& parts) {
-    std::string out = "*" + std::to_string(parts.size()) + "\r\n";
-    for (const auto& part : parts) {
-        out += "$" + std::to_string(part.size()) + "\r\n";
-        out += part + "\r\n";
-    }
-    return out;
 }
 
 bool writeAllBlocking(int fd, const std::string& data) {
@@ -145,7 +127,7 @@ bool readRespValueBlocking(int fd, RespValue& value) {
 }
 
 bool sendHeartbeatCommand(int fd, const std::vector<std::string>& command, const std::string& expected) {
-    if (!writeAllBlocking(fd, encodeRespCommand(command))) return false;
+    if (!writeAllBlocking(fd, RespWriter::array(command))) return false;
     std::string line;
     if (!readRespLine(fd, line)) return false;
     return line.rfind(expected, 0) == 0;
@@ -249,7 +231,7 @@ bool fetchClusterSlotMap(const std::string& node,
                          ClusterSlotMapSnapshot& snapshot) {
     std::string host;
     int port = 0;
-    if (!splitNodeAddr(node, host, port)) return false;
+    if (!parseNodeAddress(node, host, port)) return false;
 
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return false;
@@ -271,13 +253,13 @@ bool fetchClusterSlotMap(const std::string& node,
     bool ok = true;
     std::string line;
     if (!password.empty()) {
-        ok = writeAllBlocking(fd, encodeRespCommand({"AUTH", password})) &&
+        ok = writeAllBlocking(fd, RespWriter::array({"AUTH", password})) &&
              readRespLine(fd, line) && line.rfind("+OK", 0) == 0;
     }
 
     RespValue response;
     if (ok) {
-        ok = writeAllBlocking(fd, encodeRespCommand({"CLUSTER", "SLOTMAP"})) &&
+        ok = writeAllBlocking(fd, RespWriter::array({"CLUSTER", "SLOTMAP"})) &&
              readRespValueBlocking(fd, response);
     }
     close(fd);
@@ -319,7 +301,7 @@ std::vector<std::string> slowLogCommandParts(const RespValue& cmd) {
 bool pingClusterNode(const std::string& node, const std::string& password) {
     std::string host;
     int port = 0;
-    if (!splitNodeAddr(node, host, port)) return false;
+    if (!parseNodeAddress(node, host, port)) return false;
 
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return false;
@@ -369,7 +351,7 @@ bool sendCommandToNode(const std::string& node, const std::string& password,
                        const std::vector<std::string>& command, RespValue& response) {
     std::string host;
     int port = 0;
-    if (!splitNodeAddr(node, host, port)) return false;
+    if (!parseNodeAddress(node, host, port)) return false;
 
     const int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return false;
@@ -385,11 +367,11 @@ bool sendCommandToNode(const std::string& node, const std::string& password,
               connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0;
     std::string line;
     if (ok && !password.empty()) {
-        ok = writeAllBlocking(fd, encodeRespCommand({"AUTH", password})) &&
+        ok = writeAllBlocking(fd, RespWriter::array({"AUTH", password})) &&
              readRespLine(fd, line) && line.rfind("+OK", 0) == 0;
     }
     if (ok) {
-        ok = writeAllBlocking(fd, encodeRespCommand(command)) &&
+        ok = writeAllBlocking(fd, RespWriter::array(command)) &&
              readRespValueBlocking(fd, response);
     }
     close(fd);
@@ -736,7 +718,7 @@ bool MiniRedisServer::configureFailover() {
     for (const auto& node : failover_nodes_) {
         std::string host;
         int port = 0;
-        if (!splitNodeAddr(node, host, port)) {
+        if (!parseNodeAddress(node, host, port)) {
             MINIREDIS_LOG_ERROR("failover") << "invalid failover node: " << node;
             return false;
         }
@@ -1359,7 +1341,7 @@ bool MiniRedisServer::syncFromMaster() {
     std::string host;
     int port = 0;
     const std::string master = activeMaster();
-    if (master.empty() || master == current_node_ || !splitNodeAddr(master, host, port)) {
+    if (master.empty() || master == current_node_ || !parseNodeAddress(master, host, port)) {
         MINIREDIS_LOG_ERROR("replication") << "invalid active master address: " << master;
         return false;
     }
@@ -1430,7 +1412,7 @@ bool MiniRedisServer::tryPartialSyncFromMaster(const std::string& host, int port
 
     std::string line;
     if (!config_.requirepass.empty()) {
-        if (!writeAllBlocking(fd, encodeRespCommand({"AUTH", config_.requirepass})) ||
+        if (!writeAllBlocking(fd, RespWriter::array({"AUTH", config_.requirepass})) ||
             !readRespLine(fd, line) || line.rfind("+OK", 0) != 0) {
             MINIREDIS_LOG_WARN("replication") << "master auth failed during partial sync";
             close(fd);
@@ -1440,7 +1422,7 @@ bool MiniRedisServer::tryPartialSyncFromMaster(const std::string& host, int port
 
     RespValue response;
     const std::string requested_replid = isValidReplicationId(last_replid) ? last_replid : "?";
-    if (!writeAllBlocking(fd, encodeRespCommand(
+    if (!writeAllBlocking(fd, RespWriter::array(
                                   {"REPLPSYNC", requested_replid,
                                    std::to_string(last_offset)})) ||
         !readRespValueBlocking(fd, response)) {
@@ -1548,7 +1530,7 @@ bool MiniRedisServer::fullSyncFromMaster(const std::string& host, int port) {
 
     std::string line;
     if (!config_.requirepass.empty()) {
-        if (!writeAllBlocking(fd, encodeRespCommand({"AUTH", config_.requirepass})) ||
+        if (!writeAllBlocking(fd, RespWriter::array({"AUTH", config_.requirepass})) ||
             !readRespLine(fd, line) || line.rfind("+OK", 0) != 0) {
             MINIREDIS_LOG_WARN("replication") << "master auth failed during full sync";
             close(fd);
@@ -1557,7 +1539,7 @@ bool MiniRedisServer::fullSyncFromMaster(const std::string& host, int port) {
     }
 
     RespValue response;
-    if (!writeAllBlocking(fd, encodeRespCommand({"REPLFULLSYNC"})) ||
+    if (!writeAllBlocking(fd, RespWriter::array({"REPLFULLSYNC"})) ||
         !readRespValueBlocking(fd, response)) {
         MINIREDIS_LOG_WARN("replication") << "failed to read full snapshot from master";
         close(fd);
@@ -1784,36 +1766,40 @@ int MiniRedisServer::run() {
             std::chrono::milliseconds(config_.replication_reconnect_delay_ms));
         if (primary_state_.load(std::memory_order_acquire)) replication_dispatcher_->start();
     }
-    CommandHandler command_handler(cache_, memory_pool_, config_, config_.cluster_mode,
-                                   current_node_, slot_map_.get(), &slot_map_mutex_,
-                                   aof_.get(),
-                                   [this]() { saveClusterConfigIfNeeded(); },
-                                   &replication_backlog_,
-                                   &replication_offset_,
-                                   [this](uint64_t offset) {
-                                       if (!saveReplicationState(offset)) {
-                                           MINIREDIS_LOG_WARN("replication")
-                                               << "failed to persist pushed replication state";
-                                       }
-                                   },
-                                   replication_dispatcher_.get(),
-                                   &replication_apply_mutex_,
-                                   [this]() {
-                                       std::lock_guard<std::mutex> transition_lock(
-                                           failover_transition_mutex_);
-                                       replica_following_.store(false, std::memory_order_release);
-                                       replication_backlog_.reset();
-                                       if (replication_dispatcher_) replication_dispatcher_->start();
-                                   },
-                                   &local_replid_,
-                                   &upstream_replid_,
-                                   &primary_state_,
-                                   &writes_allowed_,
-                                   [this]() { return activeMaster(); },
-                                   [this](const RespValue& command) {
-                                       return handleFailoverCommand(command);
-                                   },
-                                   [this]() { return failoverInfo(); });
+    CommandHandler command_handler(cache_, memory_pool_, config_, {
+        .cluster_mode = config_.cluster_mode,
+        .current_node = current_node_,
+        .slot_map = slot_map_.get(),
+        .slot_map_mutex = &slot_map_mutex_,
+        .aof = aof_.get(),
+        .cluster_change_callback = [this]() { saveClusterConfigIfNeeded(); },
+        .replication_backlog = &replication_backlog_,
+        .replication_offset = &replication_offset_,
+        .replication_offset_callback = [this](uint64_t offset) {
+            if (!saveReplicationState(offset)) {
+                MINIREDIS_LOG_WARN("replication")
+                    << "failed to persist pushed replication state";
+            }
+        },
+        .replication_dispatcher = replication_dispatcher_.get(),
+        .replication_apply_mutex = &replication_apply_mutex_,
+        .replica_promoted_callback = [this]() {
+            std::lock_guard<std::mutex> transition_lock(
+                failover_transition_mutex_);
+            replica_following_.store(false, std::memory_order_release);
+            replication_backlog_.reset();
+            if (replication_dispatcher_) replication_dispatcher_->start();
+        },
+        .local_replid = &local_replid_,
+        .upstream_replid = &upstream_replid_,
+        .primary_state = &primary_state_,
+        .writes_allowed = &writes_allowed_,
+        .active_master_callback = [this]() { return activeMaster(); },
+        .failover_command_callback = [this](const RespValue& command) {
+            return handleFailoverCommand(command);
+        },
+        .failover_info_callback = [this]() { return failoverInfo(); },
+    });
     command_handler.refreshRuntimeStats();
 
     io_schedulers_.reserve(config_.io_threads);

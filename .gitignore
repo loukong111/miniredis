@@ -1,6 +1,7 @@
 # Build outputs
 build/
 build-*/
+dist/
 
 # Runtime snapshots and temporary persistence files
 snapshot_*.dat
@@ -16,11 +17,6 @@ snapshot_*.dat
 *.aof.rewrite.tmp
 cluster_*.conf
 *.log
-
-# Benchmark generated reports
-build/benchmark-report.txt
-build/benchmark-summary.md
-build/benchmark-raw.txt
 
 # Editor and OS noise
 .DS_Store

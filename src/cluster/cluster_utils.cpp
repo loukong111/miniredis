@@ -1,4 +1,5 @@
 #include "miniredis/cluster/cluster_utils.hpp"
+#include <charconv>
 #include <functional>
 #include <iomanip>
 #include <sstream>
@@ -46,6 +47,21 @@ std::string clusterNodeId(const std::string& node_addr) {
         oss << std::setw(8) << static_cast<uint32_t>(value >> ((i % 2) * 32));
     }
     return oss.str().substr(0, 40);
+}
+
+bool parseNodeAddress(const std::string& node, std::string& host, int& port) {
+    const size_t separator = node.rfind(':');
+    if (separator == std::string::npos || separator == 0) return false;
+    const char* begin = node.data() + separator + 1;
+    const char* end = node.data() + node.size();
+    int parsed_port = 0;
+    const auto [ptr, ec] = std::from_chars(begin, end, parsed_port);
+    if (ec != std::errc() || ptr != end || parsed_port < 1 || parsed_port > 65535) {
+        return false;
+    }
+    host = node.substr(0, separator);
+    port = parsed_port;
+    return true;
 }
 
 } // namespace miniredis

@@ -54,7 +54,6 @@ private:
 
     static uint64_t currentUnixMillis();
     static uint64_t expireAtMillis(int ttl_seconds);
-    static std::string encodeCommand(const std::vector<std::string>& parts);
     static bool applyCommand(const std::vector<std::string>& parts, SnapshotData& data);
     static bool writeAllToFd(int fd, const std::string& data);
 

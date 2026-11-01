@@ -1,6 +1,6 @@
-# MiniRedis 8 分钟演示指南
+# 操作与演示指南
 
-这套流程面向 C++ 服务端实习面试或项目展示。主线是“定位 -> 请求链路 -> 可观测性 -> 持久化 -> 高可用 -> 性能证据”，不需要把每个按钮都点一遍。
+本文给出约 8 分钟的功能验证流程：启动服务、执行命令、检查监控、验证恢复与故障转移，最后查看压测证据。设计约束见 [架构设计](architecture.md)。
 
 ## 演示前检查
 
@@ -141,7 +141,7 @@ scripts/benchmark.sh
 | TTL 和持久化 | 重启后 key/TTL 恢复 | recovery soak |
 | AOF 可恢复 | rewrite 后重启可读 | 坏尾、rewrite 中断和 buffer 超限单测 |
 | 复制连续性 | 新主写入传到副本 | replid/offset/backlog 测试 |
-| 防脑裂 | `READONLY` 和 `MASTERDOWN` | failover smoke + ASan/UBSan |
+| 写入隔离 | `READONLY` 和 `MASTERDOWN` | failover smoke + ASan/UBSan |
 | 性能 | 多轮聚合表 | TSV 逐轮数据 + 可重复脚本 |
 
 ## 备用方案

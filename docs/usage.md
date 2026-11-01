@@ -1,20 +1,20 @@
-# 使用与部署
+# 使用指南
 
-## 构建
+## 平台与构建
 
-依赖：
+服务端依赖 Linux 的 `epoll`、`eventfd` 和 POSIX socket；Windows/macOS 可通过 Docker 或远程 Linux 运行服务端。Qt Console 可以独立构建，只通过 RESP/HTTP 与服务端通信。当前 CI 验证 Linux 服务端和 Qt 客户端，其他平台尚需验证。
 
-- Linux
-- CMake 3.20+
-- 支持 C++20 的 g++
-- 可选：`libmysqlclient-dev`
+| 构建选项 | Linux 默认值 | 非 Linux 默认值 |
+| :--- | :--- | :--- |
+| `MINIREDIS_BUILD_SERVER` | ON | OFF |
+| `MINIREDIS_BUILD_TESTS` | ON | OFF |
+| `MINIREDIS_BUILD_QT_CONSOLE` | OFF | OFF |
 
-MySQL 节点发现默认在检测到 `mysqlclient` 时参与本地构建。若要生成不依赖
-MySQL 运行库的通用服务端二进制，配置时加入
-`-DMINIREDIS_ENABLE_MYSQL_DISCOVERY=OFF`。`scripts/package_release.sh` 和
-Docker 镜像默认采用这一便携配置。
-- 可选：`redis-tools`，用于 `redis-cli` 和 `redis-benchmark`
-- 可选：`Qt6 Core/Widgets/Network`，用于构建 Qt Console
+在非 Linux 平台强制开启服务端或测试时，CMake 会报错。可用 `scripts/check_platform_build.sh` 检查服务端与独立客户端的构建边界。
+
+依赖：CMake 3.20+、支持 C++20 的编译器；Qt Console 额外需要 Qt6 Core/Widgets/Network。集成测试需要 Bash、`redis-cli`、`curl`，原始协议测试需要 Python 3；压测需要 `redis-benchmark`。
+
+MySQL 节点发现是可选功能，本地构建检测到 `mysqlclient` 时启用。使用 `-DMINIREDIS_ENABLE_MYSQL_DISCOVERY=OFF` 可生成不依赖该运行库的二进制；发布脚本和 Docker 镜像默认关闭它。
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -29,30 +29,13 @@ cmake -S . -B build-qt \
   -DCMAKE_BUILD_TYPE=Release \
   -DMINIREDIS_BUILD_SERVER=OFF \
   -DMINIREDIS_BUILD_TESTS=OFF \
-  -DMINIREDIS_BUILD_QT_CONSOLE=ON \
-  -DMINIREDIS_ENABLE_INTEGRATION_TESTS=OFF \
-  -DCMAKE_CXX_COMPILER=/usr/bin/g++
+  -DMINIREDIS_BUILD_QT_CONSOLE=ON
 
 cmake --build build-qt -j
 ./build-qt/tools/qt_console/miniredis_qt_console
 ```
 
-Qt Console 可以作为主要演示入口：顶部菜单和工具栏负责连接、运行、服务、集群、监控、自动验证和压测入口；左侧资源管理器展示当前连接、常用 KV 命令、诊断命令、集群命令和 ACL 命令；中间命令工作区提供多行编辑、模板、历史记录、选中/当前行执行、全部执行和统一输出；服务管理、演示中心、集群路由、运行指标、诊断工具、Prometheus 指标和压测能力都通过弹窗打开，主界面保持简洁。
-
-持久化演示推荐流程：进入服务管理，勾选 `AOF` 后启动服务，点击持久化演示写入普通 key 和 TTL key，点击重写 AOF 压缩增量日志，再重启服务并在命令工作区查询 `GET persist:plain`、`TTL persist:plain`、`INFO persistence`。
-
-如果只想演示项目能力，可以直接使用演示中心：
-
-- `Run Replication Demo`：启动 master/replica，展示 backlog/PSYNC offset、replica 断开期间写入和重连后的增量恢复。
-- `Run AOF Recovery Demo`：启动带 AOF 的单节点，写入数据、触发 rewrite、重启并验证恢复。
-- `Run Cluster Demo`：启动三节点集群，展示 slots/nodes，并停止一个节点观察 pfail/fail。
-- `Smoke 测试`：运行 `tests/integration/smoke.sh`，覆盖 RESP、AUTH、TTL、stats、cluster 等集成场景。
-- `Recovery/Soak`：运行 `scripts/recovery_soak.sh`，覆盖持久化恢复、坏尾/重启和短时稳定性验证。
-- `Replica 脚本`：运行 `scripts/replica_demo.sh smoke`，验证主从复制和只读副本行为。
-- `自动故障转移`：运行 `scripts/failover_demo.sh smoke`，验证多数派选主、旧主降级、数据追平和写隔离。
-- `Cluster 脚本`：运行 `scripts/cluster_demo.sh smoke`，验证 slot range、cluster nodes、slots 和路由行为。
-
-压测入口支持两种模式：运行 SET/GET 直接调用 `redis-benchmark` 测试当前连接服务，运行矩阵压测调用 `scripts/benchmark.sh`，按 `1 / 当前值` 对比 `io_threads` 和 `cache_shards` 组合。
+Qt Console 提供命令工作区、服务管理、诊断监控和自动验证入口。具体操作见 [演示指南](demo-guide.md)，压测脚本参数见 [测试与压测](testing-benchmark.md)。
 
 ## 本地运行
 
@@ -112,14 +95,11 @@ redis-cli -p 6366 -a change-me SET foo bar
   --acl-user 'app password=apppass role=readwrite commands=ping,get,set,setnx,mget,getdel,getex,append,strlen,type,incr,decr,incrby,decrby,del,exists,expire,pexpire,persist,ttl,pttl,info,slowlog,command,acl,bgrewriteaof keys=app:* enabled=true' \
   --acl-user auditor:auditpass:readonly
 
-redis-cli -p 6366 AUTH app apppass
-redis-cli -p 6366 SET app:foo bar
-redis-cli -p 6366 ACL WHOAMI
-redis-cli -p 6366 AUTH auditor auditpass
-redis-cli -p 6366 GET app:foo
-redis-cli -p 6366 AUTH admin adminpass
-redis-cli -p 6366 ACL LIST
-redis-cli -p 6366 ACL GETUSER app
+REDISCLI_AUTH=apppass redis-cli -p 6366 --user app SET app:foo bar
+REDISCLI_AUTH=apppass redis-cli -p 6366 --user app ACL WHOAMI
+REDISCLI_AUTH=auditpass redis-cli -p 6366 --user auditor GET app:foo
+REDISCLI_AUTH=adminpass redis-cli -p 6366 --user admin ACL LIST
+REDISCLI_AUTH=adminpass redis-cli -p 6366 --user admin ACL GETUSER app
 ```
 
 配置文件也可以写成：
@@ -336,26 +316,6 @@ stats 示例：
 }
 ```
 
-## Systemd
+## 安装与运维
 
-systemd 示例位于：
-
-```text
-deploy/miniredis.service
-```
-
-生产部署推荐直接参考 [生产部署指南](production-deploy.md)。如果手动安装，可以使用下面的最小流程：
-
-```bash
-sudo useradd --system --no-create-home --shell /usr/sbin/nologin miniredis
-sudo mkdir -p /opt/miniredis /var/lib/miniredis /var/log/miniredis /etc/miniredis
-sudo cp build/miniredis /opt/miniredis/
-sudo cp config/miniredis.prod.conf /etc/miniredis/miniredis.conf
-sudo cp deploy/miniredis.service /etc/systemd/system/miniredis.service
-sudo chown -R miniredis:miniredis /var/lib/miniredis
-sudo chown -R miniredis:miniredis /var/log/miniredis
-sudo install -m 600 deploy/miniredis.env.example /etc/miniredis/miniredis.env
-sudoedit /etc/miniredis/miniredis.env
-sudo systemctl daemon-reload
-sudo systemctl enable --now miniredis
-```
+Linux systemd 安装、升级回滚、备份恢复及故障处理统一见 [部署与运维](ops-runbook.md)。

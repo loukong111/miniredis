@@ -93,7 +93,7 @@ std::optional<RespValue> RespDecoder::parseSimpleString(const std::string& data,
     val.str = data.substr(pos + 1, end - pos - 1);
     pos = end + 2;
     return val;
-}//+OK\r\n
+}
 
 std::optional<RespValue> RespDecoder::parseError(const std::string& data, size_t& pos) {
     auto end_value = findLineEnd(data, pos);
@@ -104,7 +104,7 @@ std::optional<RespValue> RespDecoder::parseError(const std::string& data, size_t
     val.str = data.substr(pos + 1, end - pos - 1);
     pos = end + 2;
     return val;
-}//-ERR xxx\r\n
+}
 
 std::optional<RespValue> RespDecoder::parseInteger(const std::string& data, size_t& pos) {
     auto end_value = findLineEnd(data, pos);
@@ -121,7 +121,7 @@ std::optional<RespValue> RespDecoder::parseInteger(const std::string& data, size
     val.integer = n;
     pos = end + 2;
     return val;
-}//123\r\n
+}
 
 std::optional<RespValue> RespDecoder::parseBulkString(const std::string& data, size_t& pos) {
     auto len_end_value = findLineEnd(data, pos);
@@ -161,7 +161,7 @@ std::optional<RespValue> RespDecoder::parseBulkString(const std::string& data, s
     val.str = data.substr(dataStart, value_size);
     pos = frame_end;
     return val;
-}//$4\r\njack\r\n
+}
 
 std::optional<RespValue> RespDecoder::parseArray(const std::string& data, size_t& pos,
                                                  size_t depth) {
@@ -186,7 +186,7 @@ std::optional<RespValue> RespDecoder::parseArray(const std::string& data, size_t
     val.type = RespType::ARRAY;
     val.array = std::move(elements);
     return val;
-}//*2\r\n$3\r\nGET\r\n$4\r\nname\r\n
+}
 
 // ---------- Writer ----------
 

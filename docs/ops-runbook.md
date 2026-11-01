@@ -1,212 +1,180 @@
-# 运维 Runbook
+# 部署与运维
 
-这份 Runbook 面向内网服务器上的 MiniRedis 单机或小规模集群部署，用来快速定位常见问题。
+本文集中说明 Linux 内网实例的安装、升级、备份恢复和排障。构建选项与配置字段见 [使用指南](usage.md)，复制与集群操作分别见 [复制机制](replication.md) 和 [Cluster 模式](cluster.md)。
 
-## 快速状态检查
+## 目录与默认配置
+
+| 路径 | 用途 |
+| :--- | :--- |
+| `/opt/miniredis/miniredis` | 服务端二进制 |
+| `/etc/miniredis/miniredis.conf` | 非敏感配置 |
+| `/etc/miniredis/miniredis.env` | 认证和环境变量，权限 600 |
+| `/var/lib/miniredis/` | snapshot、AOF、复制及集群状态 |
+| `/var/log/miniredis/` | 日志 |
+| `/var/backups/miniredis/` | 默认备份目录 |
+
+示例配置默认只监听本机。需要业务网段访问时，绑定服务器内网 IP 并限制来源；非回环 RESP 监听必须配置 `requirepass` 或 ACL。监控接口没有认证，应保持本机访问或通过受控采集链路读取。
+
+`config/miniredis.prod.conf` 启用 AOF `everysec` 和周期快照。`maxmemory` 是 key/value 字节额度，容量规划还应计入容器、连接缓冲、内存池和线程等额外内存。
+
+## 首次安装
+
+在源码目录构建并验证：
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+ctest --test-dir build --output-on-failure
+
+sudo deploy/install.sh
+sudoedit /etc/miniredis/miniredis.env
+sudo systemctl enable --now miniredis
+```
+
+启动前将环境文件中的 `MINIREDIS_REQUIREPASS=change-me` 替换为部署口令。ACL 用户语法见 [使用指南](usage.md#本地运行)。安装脚本会创建服务用户、数据和日志目录，并安装 systemd unit 与 logrotate 配置。
+
+发布包可通过以下命令生成：
+
+```bash
+scripts/package_release.sh
+```
+
+解压后在包目录运行 `sudo deploy/install.sh`。发布包默认关闭 MySQL 节点发现；需要该能力时应单独构建并准备对应运行库。安装脚本会覆盖主配置文件，升级前应备份已有配置。
+
+## 验证与内网访问
 
 ```bash
 systemctl status miniredis
 journalctl -u miniredis -n 100 --no-pager
 curl -fsS http://127.0.0.1:8080/healthz
 curl -fsS http://127.0.0.1:8080/readyz
-redis-cli -p 6366 -a "$MINIREDIS_REQUIREPASS" PING
+REDISCLI_AUTH="$MINIREDIS_REQUIREPASS" redis-cli -p 6366 PING
 ```
 
-如果 `/healthz` 正常但 `/readyz` 失败，优先查看 RESP 端口是否监听、持久化恢复是否失败、AOF/snapshot 路径权限是否正确。
+这里的 `MINIREDIS_REQUIREPASS` 需在当前终端设置；systemd 的环境文件不会自动导入交互终端。`/healthz` 表示监控服务存活，`/readyz` 表示 RESP 服务已就绪。后者失败时，应先查启动日志、端口与持久化路径。
 
-## 服务启动失败
-
-观察：
-
-```bash
-journalctl -u miniredis -n 200 --no-pager
-systemctl cat miniredis
-```
-
-常见原因：
-
-- 端口被占用。
-- `/var/lib/miniredis` 或 `/var/log/miniredis` 权限不属于 `miniredis` 用户。
-- 非本地 `bind` 未配置 `MINIREDIS_REQUIREPASS` 或 ACL 用户。
-- 配置文件中端口、布尔值、`appendfsync`、`eviction_policy` 写错。
-
-处理：
-
-```bash
-ss -lntp | grep -E '6366|8080'
-sudo chown -R miniredis:miniredis /var/lib/miniredis /var/log/miniredis
-sudoedit /etc/miniredis/miniredis.conf
-sudoedit /etc/miniredis/miniredis.env
-sudo systemctl restart miniredis
-```
-
-## 端口占用
-
-观察：
-
-```bash
-ss -lntp | grep 6366
-ss -lntp | grep 8080
-```
-
-处理：
-
-- 如果是旧 MiniRedis 进程残留，先 `sudo systemctl stop miniredis`，确认后再停止残留进程。
-- 如果端口被其他服务占用，修改 `/etc/miniredis/miniredis.conf` 中的 `port` 或 `stats_port`。
-
-## 认证失败
-
-观察：
-
-```bash
-redis-cli -p 6366 PING
-redis-cli -p 6366 -a "$MINIREDIS_REQUIREPASS" PING
-redis-cli -p 6366 AUTH app apppass
-redis-cli -p 6366 ACL WHOAMI
-```
-
-处理：
-
-- 检查 `/etc/miniredis/miniredis.env` 权限是否为 `600`。
-- 检查 `MINIREDIS_REQUIREPASS` 或 `MINIREDIS_ACL_USERS` 是否符合预期。
-- ACL 用户需要命令权限和 key 前缀权限都满足，例如业务 key 为 `app:*`。
-
-## 内存达到上限
-
-观察：
-
-```bash
-redis-cli -p 6366 -a "$MINIREDIS_REQUIREPASS" INFO memory
-curl -fsS http://127.0.0.1:8080/stats
-```
-
-关注：
-
-- `used_memory`
-- `maxmemory`
-- `maxmemory_policy`
-- `evicted_keys`
-
-处理：
-
-- 如果 `noeviction` 返回 OOM，考虑调大 `maxmemory` 或改为 `lru`。
-- 如果 `lru` 下淘汰过多，说明容量不足或 TTL 设置不合理。
-- 短期处理可以降低写入量或清理业务前缀 key；长期处理应扩容或拆分实例。
-
-## AOF 文件增长过快
-
-观察：
-
-```bash
-ls -lh /var/lib/miniredis/appendonly.aof
-redis-cli -p 6366 -a "$MINIREDIS_REQUIREPASS" INFO persistence
-```
-
-处理：
-
-```bash
-redis-cli -p 6366 -a "$MINIREDIS_REQUIREPASS" BGREWRITEAOF
-redis-cli -p 6366 -a "$MINIREDIS_REQUIREPASS" INFO persistence
-```
-
-如果 `aof_rewrite_last_status` 为失败状态，查看日志：
-
-```bash
-journalctl -u miniredis -n 200 --no-pager
-tail -n 200 /var/log/miniredis/miniredis.log
-```
-
-常见原因是磁盘空间不足、目录权限错误、rewrite buffer 超限。
-
-## Snapshot 损坏或恢复异常
-
-观察：
-
-```bash
-ls -lh /var/lib/miniredis
-journalctl -u miniredis -n 200 --no-pager
-```
-
-MiniRedis 会将损坏 snapshot 标记为 `.bad`，并尝试加载 `.bak`。
-
-处理：
-
-- 如果 `.bak` 可用，服务会自动回退。
-- 如果 snapshot 和 `.bak` 都不可用，但 AOF 可用，启动后仍会 replay AOF。
-- 如果数据目录严重损坏，先停止服务，再从备份恢复。
-
-## 备份
-
-推荐使用脚本：
-
-```bash
-sudo deploy/backup.sh
-```
-
-默认输出：
+如需开放内网访问，在环境文件中设置：
 
 ```text
-/var/backups/miniredis/miniredis-backup-<timestamp>.tar.gz
+MINIREDIS_BIND=10.0.0.12
+MINIREDIS_REQUIREPASS=replace-with-deployment-password
 ```
 
-也可以指定输出目录：
+修改后重启服务，并在防火墙或安全组中仅允许业务网段访问 RESP 端口。监控端口建议继续监听 `127.0.0.1:8080`。
+
+## 备份与恢复
+
+为保证 snapshot、AOF 和复制状态来自一致的文件集合，备份前安排停机窗口：
 
 ```bash
-sudo BACKUP_ROOT=/data/backups/miniredis deploy/backup.sh
+sudo systemctl stop miniredis
+sudo deploy/backup.sh
+sudo systemctl start miniredis
 ```
 
-## 恢复
+备份脚本包含数据目录、配置、二进制、systemd unit 和 logrotate 配置，默认输出 `/var/backups/miniredis/miniredis-backup-<timestamp>.tar.gz`。可用 `sudo BACKUP_ROOT=/data/backups/miniredis deploy/backup.sh` 指定目录。运行中复制文件不能保证跨文件的一致恢复点。
 
-恢复前先停止服务：
+恢复前检查备份内容并保留当前数据副本，再停止服务、解压可信备份：
 
 ```bash
 sudo systemctl stop miniredis
 sudo tar --absolute-names -xzf /var/backups/miniredis/miniredis-backup-YYYYmmddHHMMSS.tar.gz
 sudo chown -R miniredis:miniredis /var/lib/miniredis /var/log/miniredis
+sudo systemctl daemon-reload
 sudo systemctl start miniredis
 curl -fsS http://127.0.0.1:8080/readyz
 ```
 
-恢复后建议检查：
+归档使用绝对路径，恢复会覆盖对应文件。恢复后检查 `INFO persistence`、`INFO memory` 和业务 key/TTL；复制或集群实例还需核对 leader、offset 和 slot ownership。
 
-```bash
-redis-cli -p 6366 -a "$MINIREDIS_REQUIREPASS" INFO persistence
-redis-cli -p 6366 -a "$MINIREDIS_REQUIREPASS" INFO memory
-```
+## 升级与回滚
 
-## 升级失败回滚
-
-升级前：
-
-```bash
-sudo deploy/backup.sh
-sudo cp /opt/miniredis/miniredis /opt/miniredis/miniredis.bak.$(date +%Y%m%d%H%M%S)
-```
-
-回滚：
+先在目标环境验证新版本，再安排停机、备份并替换二进制：
 
 ```bash
 sudo systemctl stop miniredis
-sudo cp /opt/miniredis/miniredis.bak.<timestamp> /opt/miniredis/miniredis
+sudo deploy/backup.sh
+sudo cp /opt/miniredis/miniredis /opt/miniredis/miniredis.previous
+sudo install -m 0755 build/miniredis /opt/miniredis/miniredis
 sudo systemctl start miniredis
 curl -fsS http://127.0.0.1:8080/readyz
 ```
 
-数据目录不要随版本发布包覆盖。
+升级失败时停止服务，将 `miniredis.previous` 复制回正式路径，再启动并验证。数据目录独立于程序发布；如版本涉及文件格式变化，应先验证兼容性，必要时连同升级前的数据备份一起恢复。
 
-## 上线前压测
+## 持久化与监控
+
+启动时先加载 snapshot；主快照损坏会标记为 `.bad` 并尝试 `.bak`，随后 replay AOF。AOF 的不完整或非法尾部会被截断，前面的完整记录仍可恢复。文件格式和切换过程见 [架构设计](architecture.md#持久化)。
+
+手动重写 AOF：
 
 ```bash
-ctest --test-dir build --output-on-failure
+REDISCLI_AUTH="$MINIREDIS_REQUIREPASS" redis-cli -p 6366 BGREWRITEAOF
+REDISCLI_AUTH="$MINIREDIS_REQUIREPASS" redis-cli -p 6366 INFO persistence
+```
+
+| 入口 | 主要用途 |
+| :--- | :--- |
+| `/healthz`、`/readyz` | 存活与就绪 |
+| `/stats`、`/metrics` | JSON 与 Prometheus 指标 |
+| `INFO memory` | key/value 内存、额度、淘汰 |
+| `INFO persistence` | snapshot 和 AOF rewrite 状态 |
+| `INFO replication` | 角色、replid、offset、副本连通性与选举状态 |
+| `SLOWLOG GET` | 慢命令诊断 |
+
+日志位于 `/var/log/miniredis/miniredis.log`，也可通过 `journalctl -u miniredis` 查看。应持续关注拒绝连接、延迟分位数、内存与淘汰、snapshot/AOF 失败和复制积压。日志轮转配置见 `deploy/logrotate/miniredis`。
+
+## 故障处理
+
+### 启动或就绪失败
+
+```bash
+journalctl -u miniredis -n 200 --no-pager
+systemctl cat miniredis
+ss -lntp
+```
+
+检查端口冲突、配置值、数据和日志目录权限，以及非回环监听是否启用认证。端口冲突应调整 `port`/`stats_port` 或停止已确认的旧实例。路径权限可按以下方式修复：
+
+```bash
+sudo chown -R miniredis:miniredis /var/lib/miniredis /var/log/miniredis
+```
+
+### 认证或授权失败
+
+检查环境文件是否符合预期、权限是否为 600，以及客户端是否在当前连接发送认证。不同的 `redis-cli` 进程不会共享 AUTH 状态：
+
+```bash
+REDISCLI_AUTH="$MINIREDIS_REQUIREPASS" redis-cli -p 6366 ACL WHOAMI
+REDISCLI_AUTH=apppass redis-cli -p 6366 --user app GET app:foo
+```
+
+ACL 用户的角色、命令权限和 key 前缀权限必须同时满足；`commands=` 不会提升角色权限。
+
+### 写入返回 OOM
+
+检查 `INFO memory` 和 `/stats`。`noeviction` 在额度不足时拒绝写入，`lru` 在命中 shard 内淘汰。由于额度按 shard 划分，热点 shard 可能先满，即使全局统计尚未达到上限。应结合 key 分布、TTL 和淘汰率调整容量或实例划分。
+
+### AOF 增长或 rewrite 失败
+
+检查 `INFO persistence`、日志、可用磁盘空间、目录权限和 rewrite buffer 限制。rewrite 失败会保留旧 AOF，可在消除原因后重试 `BGREWRITEAOF`；启动时会清理残留 `.rewrite.tmp`。
+
+### Snapshot 损坏
+
+查看数据目录和启动日志，确认 `.bad` 与 `.bak`。有可用备份时自动回退；无可用快照而 AOF 可用时仍会尝试 replay AOF。文件组严重损坏时先停服、保留现场，再从已验证备份恢复。
+
+### 写入返回 READONLY 或 MASTERDOWN
+
+`READONLY` 表示当前实例为 replica；`MASTERDOWN` 表示自动故障转移组未达到写入所需 quorum。通过 `INFO replication` 核对当前 leader、成员连通性和 epoch，再将客户端连接到可写主节点。选举与恢复步骤见 [复制机制](replication.md)。
+
+## 部署前验证
+
+确认 Release 构建和 CTest 通过，运行恢复与资源故障验证，并在目标硬件上完成容量评估：
+
+```bash
 REQUESTS=100000 CLIENTS=50 scripts/recovery_soak.sh
 REQUESTS=100000 CLIENTS=50 scripts/resource_failure_soak.sh
 BENCH_MATRIX=1 IO_THREADS_LIST="1 4" CACHE_SHARDS_LIST="1 16" scripts/benchmark.sh
 ```
 
-关注：
-
-- p95/p99/max 延迟是否稳定。
-- RSS 和 `used_memory` 是否符合预期。
-- `rejected_connections` 是否为 0。
-- `evicted_keys` 是否符合容量规划。
-- AOF rewrite 和 snapshot 最近状态是否正常。
+部署配置还应确认认证、网段限制、数据路径与权限、监控采集，以及经过演练的备份和回滚流程。脚本参数及数据解释见 [测试与压测](testing-benchmark.md)。

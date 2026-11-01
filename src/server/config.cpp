@@ -96,6 +96,29 @@ std::string unquote(std::string value) {
     return value;
 }
 
+std::string stripComment(const std::string& line) {
+    char quote = '\0';
+    bool escaped = false;
+    for (size_t i = 0; i < line.size(); ++i) {
+        const char ch = line[i];
+        if (quote != '\0') {
+            if (ch == '\\' && !escaped) {
+                escaped = true;
+                continue;
+            }
+            if (ch == quote && !escaped) quote = '\0';
+            escaped = false;
+            continue;
+        }
+        if (ch == '\'' || ch == '"') {
+            quote = ch;
+        } else if (ch == '#') {
+            return line.substr(0, i);
+        }
+    }
+    return line;
+}
+
 bool parseBool(const std::string& value) {
     std::string lowered = toLower(value);
     if (lowered == "1" || lowered == "true" || lowered == "yes" || lowered == "on") {
@@ -348,10 +371,7 @@ bool loadConfigFile(AppConfig& config, const std::string& path) {
     try {
         while (std::getline(input, line)) {
             ++line_no;
-            size_t comment = line.find('#');
-            if (comment != std::string::npos) {
-                line = line.substr(0, comment);
-            }
+            line = stripComment(line);
             line = trim(line);
             if (line.empty()) continue;
 
@@ -719,6 +739,9 @@ ConfigParseResult parseConfig(int argc, char* argv[], AppConfig& config) {
                 return ConfigParseResult::Error;
             }
         }
+    }
+    if (config.snapshot_file.empty()) {
+        config.snapshot_file = "snapshot_" + std::to_string(config.port) + ".dat";
     }
     return ConfigParseResult::Ok;
 }

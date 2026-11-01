@@ -99,13 +99,15 @@ CacheStore::~CacheStore() {
 }
 
 CacheStore::Shard& CacheStore::shard_for(const std::string& key) {
-    size_t idx = std::hash<std::string>{}(key) % shards_.size();
-    return *shards_[idx];
+    return *shards_[shard_index_for(key)];
 }
 
 const CacheStore::Shard& CacheStore::shard_for(const std::string& key) const {
-    size_t idx = std::hash<std::string>{}(key) % shards_.size();
-    return *shards_[idx];
+    return *shards_[shard_index_for(key)];
+}
+
+size_t CacheStore::shard_index_for(const std::string& key) const {
+    return std::hash<std::string>{}(key) % shards_.size();
 }
 
 size_t CacheStore::entry_memory(const std::string& key, const CacheEntry& entry) const {
@@ -133,20 +135,37 @@ size_t CacheStore::cleanup_expired_locked(Shard& shard) {
     return removed;
 }
 
-size_t CacheStore::shard_memory_limit() const {
+std::optional<size_t> CacheStore::shard_memory_limit(size_t shard_index) const {
     const size_t max_memory = max_memory_bytes_.load(std::memory_order_relaxed);
-    if (max_memory == 0) return 0;
-    return (max_memory + shards_.size() - 1) / shards_.size();
+    if (max_memory == 0) return std::nullopt;
+    const size_t base_limit = max_memory / shards_.size();
+    const size_t remainder = max_memory % shards_.size();
+    return base_limit + (shard_index < remainder ? 1 : 0);
 }
 
-bool CacheStore::evict_lru_until_fits(Shard& shard, const std::string& protected_key,
-                                      size_t required_bytes) {
-    const size_t limit = shard_memory_limit();
-    while (limit > 0 && shard.used_memory_bytes + required_bytes > limit) {
+bool CacheStore::reserve_memory(Shard& shard, size_t shard_index, const std::string& key,
+                               size_t old_memory, size_t new_memory) {
+    const auto limit = shard_memory_limit(shard_index);
+    if (!limit) return true;
+    if (new_memory > *limit) return false;
+
+    const size_t required_extra = new_memory > old_memory ? new_memory - old_memory : 0;
+    if (shard.used_memory_bytes <= *limit &&
+        required_extra <= *limit - shard.used_memory_bytes) {
+        return true;
+    }
+    return eviction_policy_.load(std::memory_order_relaxed) == EvictionPolicy::Lru &&
+           evict_lru_until_fits(shard, &key, required_extra, *limit);
+}
+
+bool CacheStore::evict_lru_until_fits(Shard& shard, const std::string* protected_key,
+                                    size_t required_bytes, size_t memory_limit) {
+    while (shard.used_memory_bytes > memory_limit ||
+           required_bytes > memory_limit - shard.used_memory_bytes) {
         auto victim = shard.store.end();
         auto oldest = std::chrono::steady_clock::time_point::max();
         for (auto it = shard.store.begin(); it != shard.store.end(); ++it) {
-            if (it->first == protected_key) continue;
+            if (protected_key && it->first == *protected_key) continue;
             if (it->second.is_expired()) {
                 victim = it;
                 break;
@@ -164,24 +183,16 @@ bool CacheStore::evict_lru_until_fits(Shard& shard, const std::string& protected
 }
 
 SetResult CacheStore::set(const std::string& key, const std::string& value, int ttl_seconds) {
-    Shard& shard = shard_for(key);
+    const size_t shard_index = shard_index_for(key);
+    Shard& shard = *shards_[shard_index];
     std::unique_lock lock(shard.mtx);
     cleanup_expired_locked(shard);
 
     auto it = shard.store.find(key);
     size_t old_memory = (it == shard.store.end()) ? 0 : entry_memory(it->first, it->second);
     size_t new_memory = key.size() + value.size();
-    const size_t limit = shard_memory_limit();
-    if (limit > 0 && new_memory > limit) {
+    if (!reserve_memory(shard, shard_index, key, old_memory, new_memory)) {
         return SetResult::OutOfMemory;
-    }
-
-    size_t required_extra = new_memory > old_memory ? new_memory - old_memory : 0;
-    if (limit > 0 && shard.used_memory_bytes + required_extra > limit) {
-        if (eviction_policy_.load(std::memory_order_relaxed) == EvictionPolicy::NoEviction ||
-            !evict_lru_until_fits(shard, key, required_extra)) {
-            return SetResult::OutOfMemory;
-        }
     }
 
     bool inserted = false;
@@ -209,7 +220,8 @@ SetResult CacheStore::set(const std::string& key, const std::string& value, int 
 }
 
 ValueUpdateResult CacheStore::set_if_absent(const std::string& key, const std::string& value) {
-    Shard& shard = shard_for(key);
+    const size_t shard_index = shard_index_for(key);
+    Shard& shard = *shards_[shard_index];
     std::unique_lock lock(shard.mtx);
     cleanup_expired_locked(shard);
 
@@ -218,15 +230,8 @@ ValueUpdateResult CacheStore::set_if_absent(const std::string& key, const std::s
     }
 
     const size_t new_memory = key.size() + value.size();
-    const size_t limit = shard_memory_limit();
-    if (limit > 0 && new_memory > limit) {
+    if (!reserve_memory(shard, shard_index, key, 0, new_memory)) {
         return ValueUpdateResult{SetResult::OutOfMemory, false, {}, 0, 0};
-    }
-    if (limit > 0 && shard.used_memory_bytes + new_memory > limit) {
-        if (eviction_policy_.load(std::memory_order_relaxed) == EvictionPolicy::NoEviction ||
-            !evict_lru_until_fits(shard, key, new_memory)) {
-            return ValueUpdateResult{SetResult::OutOfMemory, false, {}, 0, 0};
-        }
     }
 
     std::unordered_map<std::string, CacheEntry>::iterator entry_it;
@@ -247,7 +252,8 @@ ValueUpdateResult CacheStore::set_if_absent(const std::string& key, const std::s
 }
 
 ValueUpdateResult CacheStore::append(const std::string& key, const std::string& suffix) {
-    Shard& shard = shard_for(key);
+    const size_t shard_index = shard_index_for(key);
+    Shard& shard = *shards_[shard_index];
     std::unique_lock lock(shard.mtx);
     cleanup_expired_locked(shard);
 
@@ -263,17 +269,8 @@ ValueUpdateResult CacheStore::append(const std::string& key, const std::string& 
     new_value += suffix;
 
     const size_t new_memory = key.size() + new_value.size();
-    const size_t limit = shard_memory_limit();
-    if (limit > 0 && new_memory > limit) {
+    if (!reserve_memory(shard, shard_index, key, old_memory, new_memory)) {
         return ValueUpdateResult{SetResult::OutOfMemory, false, {}, 0, 0};
-    }
-    const size_t required_extra = new_memory > old_memory ? new_memory - old_memory : 0;
-    if (limit > 0 && shard.used_memory_bytes + required_extra > limit) {
-        if (eviction_policy_.load(std::memory_order_relaxed) == EvictionPolicy::NoEviction ||
-            !evict_lru_until_fits(shard, key, required_extra)) {
-            return ValueUpdateResult{SetResult::OutOfMemory, false, {}, 0, 0};
-        }
-        it = shard.store.find(key);
     }
 
     bool inserted = false;
@@ -297,7 +294,8 @@ ValueUpdateResult CacheStore::append(const std::string& key, const std::string& 
 }
 
 IncrementResult CacheStore::increment(const std::string& key, long long delta) {
-    Shard& shard = shard_for(key);
+    const size_t shard_index = shard_index_for(key);
+    Shard& shard = *shards_[shard_index];
     std::unique_lock lock(shard.mtx);
     cleanup_expired_locked(shard);
 
@@ -319,16 +317,8 @@ IncrementResult CacheStore::increment(const std::string& key, long long delta) {
     long long next = current + delta;
     std::string new_value = std::to_string(next);
     const size_t new_memory = key.size() + new_value.size();
-    const size_t limit = shard_memory_limit();
-    if (limit > 0 && new_memory > limit) {
+    if (!reserve_memory(shard, shard_index, key, old_memory, new_memory)) {
         return IncrementResult{IncrementResultCode::OutOfMemory, 0, {}, 0};
-    }
-    const size_t required_extra = new_memory > old_memory ? new_memory - old_memory : 0;
-    if (limit > 0 && shard.used_memory_bytes + required_extra > limit) {
-        if (eviction_policy_.load(std::memory_order_relaxed) == EvictionPolicy::NoEviction ||
-            !evict_lru_until_fits(shard, key, required_extra)) {
-            return IncrementResult{IncrementResultCode::OutOfMemory, 0, {}, 0};
-        }
     }
 
     bool inserted = false;
@@ -568,24 +558,16 @@ void CacheStore::load_snapshot(const SnapshotData& data) {
                 continue;
             }
         }
-        Shard& shard = shard_for(key);
+        const size_t shard_index = shard_index_for(key);
+        Shard& shard = *shards_[shard_index];
         std::unique_lock lock(shard.mtx);
-        const size_t limit = shard_memory_limit();
         const size_t new_memory = key.size() + snapshot_entry.value.size();
-        if (limit > 0 && new_memory > limit) {
-            MINIREDIS_LOG_WARN("cache") << "load_snapshot skip key over shard maxmemory, key=" << key;
+        if (!reserve_memory(shard, shard_index, key, 0, new_memory)) {
+            MINIREDIS_LOG_WARN("cache") << "load_snapshot skip key due to maxmemory, key=" << key;
             continue;
-        }
-        if (limit > 0 && shard.used_memory_bytes + new_memory > limit) {
-            if (eviction_policy_.load(std::memory_order_relaxed) == EvictionPolicy::NoEviction ||
-                !evict_lru_until_fits(shard, key, new_memory)) {
-                MINIREDIS_LOG_WARN("cache") << "load_snapshot skip key due to maxmemory, key=" << key;
-                continue;
-            }
         }
         auto& entry = shard.store[key];
         if (!entry.setValue(snapshot_entry.value, pool_)) {
-            //如果value太大会失败
             MINIREDIS_LOG_ERROR("cache") << "load_snapshot value allocation failed, key=" << key;
             shard.store.erase(key);
         } else {
@@ -637,9 +619,12 @@ void CacheStore::configure_memory_limit(size_t max_memory_bytes, EvictionPolicy 
     max_memory_bytes_.store(max_memory_bytes, std::memory_order_relaxed);
     eviction_policy_.store(policy, std::memory_order_relaxed);
     if (max_memory_bytes > 0 && policy == EvictionPolicy::Lru) {
-        for (auto& shard : shards_) {
+        for (size_t shard_index = 0; shard_index < shards_.size(); ++shard_index) {
+            auto& shard = shards_[shard_index];
             std::unique_lock lock(shard->mtx);
-            evict_lru_until_fits(*shard, "", 0);
+            if (const auto limit = shard_memory_limit(shard_index)) {
+                evict_lru_until_fits(*shard, nullptr, 0, *limit);
+            }
         }
     }
 }

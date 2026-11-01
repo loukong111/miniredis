@@ -2,19 +2,24 @@
 
 ## CTest
 
-CMake 会注册单元测试；如果本机存在 `bash`、`redis-cli` 和 `curl`，还会注册集成冒烟测试：
+Linux 默认启用测试，CMake 按本机工具注册以下用例：
+
+| CTest 用例 | 覆盖范围 | 额外依赖 |
+| :--- | :--- | :--- |
+| `miniredis_unit_tests` | 存储、协议、配置、权限、持久化和复制语义 | 无 |
+| `miniredis_integration_smoke` | RESP/HTTP、认证、恢复与集群命令 | Bash、redis-cli、curl |
+| `miniredis_failover_smoke` | 三节点选举、旧主降级与 quorum 写隔离 | Bash、redis-cli、curl |
+| `miniredis_protocol_limits` | 原始报文、协议和缓冲区边界 | Python 3 |
+
+后三项还需开启 `MINIREDIS_ENABLE_INTEGRATION_TESTS`，并构建服务端。网络用例需要允许创建本地 socket。
 
 ```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-示例输出：
-
-```text
-1/3 Test #1: miniredis_unit_tests ............. Passed
-2/3 Test #2: miniredis_integration_smoke ...... Passed
-3/3 Test #3: miniredis_failover_smoke ......... Passed
-```
+只验证单元测试时使用 `ctest --test-dir build -R '^miniredis_unit_tests$' --output-on-failure`。
 
 ## CI
 
@@ -23,9 +28,9 @@ ctest --test-dir build --output-on-failure
 - Release 构建、单元测试和 redis-cli/curl 集成冒烟测试
 - recovery/soak smoke，覆盖强杀恢复、坏快照回退和监控端点
 - resource/failure smoke，覆盖 maxmemory、LRU、AOF rewrite、AOF 坏尾和 rewrite tmp 清理
-- Debug + ASan/UBSan 单元测试
-- ASan/UBSan 三节点自动故障转移测试
-- Docker image build 检查
+- Debug + ASan/UBSan 全套 CTest，包括三节点自动故障转移和原始协议边界测试
+- Docker image build、服务端与客户端构建边界检查
+- Qt 独立客户端构建与离屏截图验证
 
 ## 集成测试覆盖
 
@@ -60,15 +65,32 @@ scripts/failover_demo.sh smoke
 
 - RESP 半包解析和粘包解析
 - CacheStore 基础读写、sharded cache、TTL 查询、TTL 惰性删除、TTL cleanup 释放内存池 block
-- maxmemory noeviction / lru 淘汰策略
+- maxmemory noeviction / lru 淘汰策略、零额度 shard 和动态降低额度
 - TTL-aware 二进制快照读写、V1 快照兼容、异常 entry count 拒绝加载
 - AOF 增量日志 replay、坏尾忽略、rewrite 中断残留文件清理、rewrite buffer 超限重试、二进制 value、TTL 绝对过期时间和命令层写 AOF
-- AUTH 未认证拒绝、错误密码拒绝、正确密码放行，以及 ACL readonly/readwrite/admin、用户启停、命令白名单/黑名单、key 前缀权限和 `ACL WHOAMI/LIST/GETUSER`
+- AUTH 未认证拒绝、错误密码与带额外零字节的密码拒绝、正确密码放行，以及 ACL readonly/readwrite/admin、用户启停、命令白名单/黑名单、key 前缀权限和 `ACL WHOAMI/LIST/GETUSER`
 - key/value 大小限制、资源保护配置解析和监控导出
 - `SETNX`、`APPEND`、`STRLEN`、`TYPE`、`INCR/DECR`、`GETDEL`、`GETEX`、`SET EX`、`EXPIRE/PEXPIRE`、`PERSIST`、`TTL/PTTL`、`MGET`、`INFO`、`SLOWLOG` 和 COMMAND 元信息响应
 - 主从复制的全量快照响应、replication ID 状态文件、backlog/PSYNC 增量同步、旧 master 推送拒绝、replica 只读保护、failover epoch 持久化投票、quorum 写隔离和 `INFO replication`
 - Redis Cluster hash slot、固定 slot 映射表、MOVED/ASK 统计、slot 路由一致性、`MEET/FORGET` 拓扑维护、`SETSLOT` 状态切换和手动 failover takeover
 - 动态线程池 stop 后拒绝继续提交任务
+
+## Sanitizer
+
+内存与未定义行为检查：
+
+```bash
+cmake -S . -B build-sanitize \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DMINIREDIS_ENABLE_ASAN=ON \
+  -DMINIREDIS_ENABLE_UBSAN=ON
+cmake --build build-sanitize -j
+ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 \
+UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
+ctest --test-dir build-sanitize --output-on-failure
+```
+
+排查数据竞争时，可单独创建 Debug 构建并设置 `-DMINIREDIS_ENABLE_TSAN=ON`。ASan 与 TSan 不能同时开启；sanitizer 检查不能替代并发语义和故障恢复验证。
 
 ## 性能压测
 
@@ -160,31 +182,4 @@ scripts/resource_failure_soak.sh
 REQUESTS=100000 CLIENTS=50 scripts/resource_failure_soak.sh
 ```
 
-默认参数：
-
-```text
-requests: 100000
-clients: 50
-runs: 3
-warm-up requests: 10000
-io_threads: 4
-cache_shards: 16
-value sizes: 64B, 1KB, 10KB
-output: build/benchmark-report.txt
-summary: build/benchmark-summary.md
-per-run data: build/benchmark-runs.tsv
-```
-
-当前环境三轮样本结果：
-
-```text
-server     value  command  avg req/s  min req/s  QPS CV  avg p99 ms
-MiniRedis  64B    SET      22225.74   21258.50   3.08%   3.018
-MiniRedis  64B    GET      23037.65   21598.27   5.56%   2.991
-MiniRedis  1KB    SET      22198.80   20479.21   6.60%   2.970
-MiniRedis  1KB    GET      24164.21   22316.45   8.86%   3.268
-MiniRedis  10KB   SET      18627.46   18024.51   2.45%   3.271
-MiniRedis  10KB   GET      20064.56   17927.57  11.01%   3.770
-```
-
-这个结果只作为当前开发机样本，不代表生产性能。完整 Redis 参考、p50/p95/p99/worst max 和逐轮数据见 [压测报告](benchmark-report.md)。正式评估还需固定 CPU 频率、设置 CPU 亲和性、使用独立物理机，并结合 `perf`、RSS、上下文切换和网络吞吐解释结果。
+历史压测结果统一保存在 [压测报告](benchmark-report.md)，避免使用方法与样本数据混杂。容量评估应在目标环境固定负载条件后重新运行。

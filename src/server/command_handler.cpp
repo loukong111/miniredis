@@ -298,18 +298,6 @@ bool parseU64Strict(const std::string& value, uint64_t& out) {
     return ec == std::errc() && ptr == value.data() + value.size();
 }
 
-bool splitNodeAddr(const std::string& node, std::string& host, int& port);
-
-std::string encodeRespCommand(const std::vector<std::string>& command) {
-    std::string out = "*" + std::to_string(command.size()) + "\r\n";
-    for (const auto& part : command) {
-        out += "$" + std::to_string(part.size()) + "\r\n";
-        out += part;
-        out += "\r\n";
-    }
-    return out;
-}
-
 bool writeAllBlocking(int fd, const std::string& data) {
     size_t written = 0;
     while (written < data.size()) {
@@ -345,10 +333,10 @@ bool readRespLine(int fd, std::string& line) {
 bool sendClusterCommandToNode(const std::string& node,
                               const std::string& password,
                               const std::vector<std::string>& command,
-                              std::string& response) {
+                              std::string& response, bool asking = false) {
     std::string host;
     int port = 0;
-    if (!splitNodeAddr(node, host, port)) return false;
+    if (!parseNodeAddress(node, host, port)) return false;
 
     int fd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return false;
@@ -369,52 +357,15 @@ bool sendClusterCommandToNode(const std::string& node,
 
     bool ok = true;
     if (!password.empty()) {
-        ok = writeAllBlocking(fd, encodeRespCommand({"AUTH", password})) &&
+        ok = writeAllBlocking(fd, RespWriter::array({"AUTH", password})) &&
+             readRespLine(fd, response) && response.rfind("+OK", 0) == 0;
+    }
+    if (ok && asking) {
+        ok = writeAllBlocking(fd, RespWriter::array({"ASKING"})) &&
              readRespLine(fd, response) && response.rfind("+OK", 0) == 0;
     }
     if (ok) {
-        ok = writeAllBlocking(fd, encodeRespCommand(command)) && readRespLine(fd, response);
-    }
-    ::close(fd);
-    return ok;
-}
-
-bool sendAskingCommandToNode(const std::string& node,
-                             const std::string& password,
-                             const std::vector<std::string>& command,
-                             std::string& response) {
-    std::string host;
-    int port = 0;
-    if (!splitNodeAddr(node, host, port)) return false;
-
-    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return false;
-
-    timeval timeout{};
-    timeout.tv_sec = 2;
-    ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-    ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
-
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(static_cast<uint16_t>(port));
-    if (::inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1 ||
-        ::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
-        ::close(fd);
-        return false;
-    }
-
-    bool ok = true;
-    if (!password.empty()) {
-        ok = writeAllBlocking(fd, encodeRespCommand({"AUTH", password})) &&
-             readRespLine(fd, response) && response.rfind("+OK", 0) == 0;
-    }
-    if (ok) {
-        ok = writeAllBlocking(fd, encodeRespCommand({"ASKING"})) &&
-             readRespLine(fd, response) && response.rfind("+OK", 0) == 0;
-    }
-    if (ok) {
-        ok = writeAllBlocking(fd, encodeRespCommand(command)) && readRespLine(fd, response);
+        ok = writeAllBlocking(fd, RespWriter::array(command)) && readRespLine(fd, response);
     }
     ::close(fd);
     return ok;
@@ -435,7 +386,7 @@ std::vector<std::string> splitNodeList(const std::string& nodes_str) {
 
 bool constantTimeEquals(const std::string& lhs, const std::string& rhs) {
     const size_t max_len = std::max(lhs.size(), rhs.size());
-    unsigned char diff = static_cast<unsigned char>(lhs.size() ^ rhs.size());
+    size_t diff = lhs.size() ^ rhs.size();
     for (size_t i = 0; i < max_len; ++i) {
         unsigned char a = i < lhs.size() ? static_cast<unsigned char>(lhs[i]) : 0;
         unsigned char b = i < rhs.size() ? static_cast<unsigned char>(rhs[i]) : 0;
@@ -527,16 +478,6 @@ std::string aclKeysText(const AclUser& user) {
     return joinAclList(prefixes);
 }
 
-bool splitNodeAddr(const std::string& node, std::string& host, int& port) {
-    size_t pos = node.rfind(':');
-    if (pos == std::string::npos || pos == 0 || pos + 1 >= node.size()) return false;
-    host = node.substr(0, pos);
-    auto port_text = node.substr(pos + 1);
-    auto [ptr, ec] = std::from_chars(port_text.data(), port_text.data() + port_text.size(), port);
-    return ec == std::errc() && ptr == port_text.data() + port_text.size() &&
-           port > 0 && port <= 65535;
-}
-
 std::string slowLogEntryResponse(const SlowLogEntry& entry) {
     std::vector<std::string> command;
     command.reserve(entry.command.size());
@@ -554,50 +495,11 @@ std::string slowLogEntryResponse(const SlowLogEntry& entry) {
 } // namespace
 
 CommandHandler::CommandHandler(CacheStore& cache, FixedMemoryPool& memory_pool,
-                               const AppConfig& config, bool cluster_mode,
-                               std::string current_node,
-                               ClusterSlotMap* slot_map,
-                               std::mutex* slot_map_mutex,
-                               AppendOnlyFile* aof,
-                               std::function<void()> cluster_change_callback,
-                               ReplicationBacklog* replication_backlog,
-                               std::atomic<uint64_t>* replication_offset,
-                               std::function<void(uint64_t)> replication_offset_callback,
-                               ReplicationDispatcher* replication_dispatcher,
-                               std::mutex* replication_apply_mutex,
-                               std::function<void()> replica_promoted_callback,
-                               const std::string* local_replid,
-                               std::string* upstream_replid,
-                               std::atomic<bool>* primary_state,
-                               std::atomic<bool>* writes_allowed,
-                               std::function<std::string()> active_master_callback,
-                               std::function<std::string(const RespValue&)> failover_command_callback,
-                               std::function<std::string()> failover_info_callback)
-    : cache_(cache),
-      memory_pool_(memory_pool),
-      config_(config),
-      cluster_mode_(cluster_mode),
-      current_node_(std::move(current_node)),
-      slot_map_(slot_map),
-      slot_map_mutex_(slot_map_mutex),
-      aof_(aof),
-      cluster_change_callback_(std::move(cluster_change_callback)),
-      replication_backlog_(replication_backlog),
-      replication_offset_(replication_offset),
-      replication_offset_callback_(std::move(replication_offset_callback)),
-      replication_dispatcher_(replication_dispatcher),
-      replication_apply_mutex_(replication_apply_mutex),
-      replica_promoted_callback_(std::move(replica_promoted_callback)),
-      local_replid_(local_replid),
-      upstream_replid_(upstream_replid),
-      primary_state_(primary_state),
-      writes_allowed_(writes_allowed),
-      active_master_callback_(std::move(active_master_callback)),
-      failover_command_callback_(std::move(failover_command_callback)),
-      failover_info_callback_(std::move(failover_info_callback)) {}
+                               const AppConfig& config, CommandContext context)
+    : cache_(cache), memory_pool_(memory_pool), config_(config), context_(std::move(context)) {}
 
 bool CommandHandler::isReplica() const {
-    if (primary_state_) return !primary_state_->load(std::memory_order_acquire);
+    if (context_.primary_state) return !context_.primary_state->load(std::memory_order_acquire);
     return !config_.replicaof.empty() &&
            !promoted_to_master_.load(std::memory_order_acquire);
 }
@@ -815,11 +717,11 @@ std::string CommandHandler::routeIfNeeded(const std::string& cmd_name, const Res
                         cmd_name == "PERSIST" || cmd_name == "GETDEL" ||
                         cmd_name == "GETEX" ||
                         cmd_name == "TTL" || cmd_name == "PTTL");
-    if (!needs_route || !cluster_mode_) return {};
+    if (!needs_route || !context_.cluster_mode) return {};
     if (cmd.array.size() < 2) {
         return RespWriter::error("wrong number of arguments for '" + cmd_name + "'");
     }
-    if (!slot_map_ || !slot_map_mutex_) {
+    if (!context_.slot_map || !context_.slot_map_mutex) {
         return RespWriter::error("cluster slot map not initialized");
     }
 
@@ -846,14 +748,14 @@ std::string CommandHandler::routeIfNeeded(const std::string& cmd_name, const Res
     std::string target;
     ClusterSlotMeta slot_meta;
     {
-        std::lock_guard<std::mutex> lock(*slot_map_mutex_);
-        target = slot_map_->GetNodeForSlot(slot);
-        slot_meta = slot_map_->GetSlotMeta(slot);
+        std::lock_guard<std::mutex> lock(*context_.slot_map_mutex);
+        target = context_.slot_map->GetNodeForSlot(slot);
+        slot_meta = context_.slot_map->GetSlotMeta(slot);
     }
     if (target.empty()) {
         return RespWriter::error("cluster has no active nodes");
     }
-    if (target != current_node_) {
+    if (target != context_.current_node) {
         if (slot_meta.state == ClusterSlotState::Importing &&
             slot_meta.peer_node == target) {
             if (asking) return {};
@@ -900,7 +802,7 @@ std::string CommandHandler::handleInfoCommand(const RespValue& cmd) const {
     if (wants_server) {
         oss << "# Server\r\n";
         oss << "miniredis_version:0.1.0\r\n";
-        oss << "redis_mode:" << (cluster_mode_ ? "cluster" : "standalone") << "\r\n";
+        oss << "redis_mode:" << (context_.cluster_mode ? "cluster" : "standalone") << "\r\n";
         oss << "tcp_bind:" << config_.bind_addr << "\r\n";
         oss << "tcp_port:" << config_.port << "\r\n";
         oss << "io_threads:" << stats.io_threads << "\r\n";
@@ -985,18 +887,18 @@ std::string CommandHandler::handleInfoCommand(const RespValue& cmd) const {
         std::string stream_replid = "?";
         if (isReplica()) {
             std::unique_lock<std::mutex> repl_lock;
-            if (replication_apply_mutex_) {
-                repl_lock = std::unique_lock<std::mutex>(*replication_apply_mutex_);
+            if (context_.replication_apply_mutex) {
+                repl_lock = std::unique_lock<std::mutex>(*context_.replication_apply_mutex);
             }
-            if (upstream_replid_ && isValidReplicationId(*upstream_replid_)) {
-                stream_replid = *upstream_replid_;
+            if (context_.upstream_replid && isValidReplicationId(*context_.upstream_replid)) {
+                stream_replid = *context_.upstream_replid;
             }
-        } else if (local_replid_ && isValidReplicationId(*local_replid_)) {
-            stream_replid = *local_replid_;
+        } else if (context_.local_replid && isValidReplicationId(*context_.local_replid)) {
+            stream_replid = *context_.local_replid;
         }
         auto replicas = splitNodeList(config_.replicas_str);
         std::vector<ReplicaDispatchStatus> replica_status;
-        if (replication_dispatcher_) replica_status = replication_dispatcher_->status();
+        if (context_.replication_dispatcher) replica_status = context_.replication_dispatcher->status();
         size_t connected_replicas = 0;
         uint64_t dispatch_errors = 0;
         uint64_t backlog_misses = 0;
@@ -1008,22 +910,22 @@ std::string CommandHandler::handleInfoCommand(const RespValue& cmd) const {
         oss << "# Replication\r\n";
         oss << "role:" << (isReplica() ? "slave" : "master") << "\r\n";
         oss << "master_replid:" << stream_replid << "\r\n";
-        const std::string active_master = active_master_callback_
-                                              ? active_master_callback_()
+        const std::string active_master = context_.active_master_callback
+                                              ? context_.active_master_callback()
                                               : config_.replicaof;
         oss << "master_node:" << (isReplica() ? active_master : "") << "\r\n";
         oss << "promoted_from:"
             << ((!isReplica() && !config_.replicaof.empty()) ? config_.replicaof : "") << "\r\n";
         oss << "master_repl_offset:"
-            << (replication_backlog_ ? replication_backlog_->currentOffset() : 0) << "\r\n";
+            << (context_.replication_backlog ? context_.replication_backlog->currentOffset() : 0) << "\r\n";
         oss << "slave_repl_offset:"
-            << (replication_offset_ ? replication_offset_->load(std::memory_order_relaxed) : 0)
+            << (context_.replication_offset ? context_.replication_offset->load(std::memory_order_relaxed) : 0)
             << "\r\n";
-        oss << "repl_backlog_active:" << (replication_backlog_ ? "1" : "0") << "\r\n";
+        oss << "repl_backlog_active:" << (context_.replication_backlog ? "1" : "0") << "\r\n";
         oss << "repl_backlog_histlen:"
-            << (replication_backlog_ ? replication_backlog_->size() : 0) << "\r\n";
+            << (context_.replication_backlog ? context_.replication_backlog->size() : 0) << "\r\n";
         oss << "connected_slaves:"
-            << (replication_dispatcher_ ? connected_replicas : 0) << "\r\n";
+            << (context_.replication_dispatcher ? connected_replicas : 0) << "\r\n";
         oss << "repl_dispatch_errors:" << dispatch_errors << "\r\n";
         oss << "repl_backlog_misses:" << backlog_misses << "\r\n";
         if (!replica_status.empty()) {
@@ -1044,7 +946,7 @@ std::string CommandHandler::handleInfoCommand(const RespValue& cmd) const {
                 oss << "slave" << i << ":addr=" << replicas[i] << ",state=offline\r\n";
             }
         }
-        if (failover_info_callback_) oss << failover_info_callback_();
+        if (context_.failover_info_callback) oss << context_.failover_info_callback();
         oss << "\r\n";
     }
 
@@ -1054,23 +956,23 @@ std::string CommandHandler::handleInfoCommand(const RespValue& cmd) const {
         size_t failed_nodes = 0;
         size_t suspect_nodes = 0;
         uint64_t epoch = 0;
-        if (slot_map_ && slot_map_mutex_) {
-            std::lock_guard<std::mutex> lock(*slot_map_mutex_);
-            assigned_slots = slot_map_->AssignedSlotCount();
-            failed_nodes = slot_map_->FailedNodeCount();
-            suspect_nodes = slot_map_->SuspectNodeCount();
-            epoch = slot_map_->GetEpoch();
+        if (context_.slot_map && context_.slot_map_mutex) {
+            std::lock_guard<std::mutex> lock(*context_.slot_map_mutex);
+            assigned_slots = context_.slot_map->AssignedSlotCount();
+            failed_nodes = context_.slot_map->FailedNodeCount();
+            suspect_nodes = context_.slot_map->SuspectNodeCount();
+            epoch = context_.slot_map->GetEpoch();
         }
 
         oss << "# Cluster\r\n";
-        oss << "cluster_enabled:" << (cluster_mode_ ? "1" : "0") << "\r\n";
-        oss << "cluster_state:" << (cluster_mode_ && (nodes.empty() || failed_nodes > 0) ? "fail" : "ok") << "\r\n";
+        oss << "cluster_enabled:" << (context_.cluster_mode ? "1" : "0") << "\r\n";
+        oss << "cluster_state:" << (context_.cluster_mode && (nodes.empty() || failed_nodes > 0) ? "fail" : "ok") << "\r\n";
         oss << "cluster_slots_assigned:" << assigned_slots << "\r\n";
         oss << "cluster_known_nodes:" << nodes.size() << "\r\n";
         oss << "cluster_failed_nodes:" << failed_nodes << "\r\n";
         oss << "cluster_suspect_nodes:" << suspect_nodes << "\r\n";
         oss << "cluster_current_epoch:" << epoch << "\r\n";
-        oss << "cluster_current_node:" << current_node_ << "\r\n";
+        oss << "cluster_current_node:" << context_.current_node << "\r\n";
         oss << "\r\n";
     }
 
@@ -1123,23 +1025,23 @@ std::string CommandHandler::handleSlowLogCommand(const RespValue& cmd) const {
 }
 
 std::vector<std::string> CommandHandler::clusterNodes() const {
-    if (!cluster_mode_) {
-        return {current_node_};
+    if (!context_.cluster_mode) {
+        return {context_.current_node};
     }
-    if (!slot_map_ || !slot_map_mutex_) {
+    if (!context_.slot_map || !context_.slot_map_mutex) {
         return {};
     }
-    std::lock_guard<std::mutex> lock(*slot_map_mutex_);
-    return slot_map_->GetAllNodes();
+    std::lock_guard<std::mutex> lock(*context_.slot_map_mutex);
+    return context_.slot_map->GetAllNodes();
 }
 
 void CommandHandler::replicateWrite(const std::vector<std::string>& command) const {
     uint64_t offset = 0;
-    if (replication_backlog_) {
-        offset = replication_backlog_->append(command);
+    if (context_.replication_backlog) {
+        offset = context_.replication_backlog->append(command);
     }
 
-    if (replication_dispatcher_ && offset > 0) replication_dispatcher_->notify(offset);
+    if (context_.replication_dispatcher && offset > 0) context_.replication_dispatcher->notify(offset);
 }
 
 std::string CommandHandler::handleReplicationCommand(const std::string& cmd_name, const RespValue& cmd) {
@@ -1154,12 +1056,12 @@ std::string CommandHandler::handleReplicationCommand(const std::string& cmd_name
         if (cmd.array.size() != 1) {
             return RespWriter::error("wrong number of arguments for 'replfullsync'");
         }
-        if (!replication_backlog_ || !local_replid_ ||
-            !isValidReplicationId(*local_replid_)) {
+        if (!context_.replication_backlog || !context_.local_replid ||
+            !isValidReplicationId(*context_.local_replid)) {
             return RespWriter::error("replication identity unavailable");
         }
-        uint64_t offset = replication_backlog_ ? replication_backlog_->currentOffset() : 0;
-        return replicationFullSyncResponse(*local_replid_, offset, cache_.snapshot());
+        uint64_t offset = context_.replication_backlog ? context_.replication_backlog->currentOffset() : 0;
+        return replicationFullSyncResponse(*context_.local_replid, offset, cache_.snapshot());
     }
 
     if (cmd_name == "REPLPSYNC") {
@@ -1167,8 +1069,8 @@ std::string CommandHandler::handleReplicationCommand(const std::string& cmd_name
             cmd.array[2].type != RespType::BULK_STRING) {
             return RespWriter::error("wrong number of arguments for 'replpsync'");
         }
-        if (!replication_backlog_ || !local_replid_ ||
-            !isValidReplicationId(*local_replid_)) {
+        if (!context_.replication_backlog || !context_.local_replid ||
+            !isValidReplicationId(*context_.local_replid)) {
             return RespWriter::error("replication identity unavailable");
         }
         const std::string& requested_replid = cmd.array[1].str;
@@ -1179,15 +1081,15 @@ std::string CommandHandler::handleReplicationCommand(const std::string& cmd_name
         if (!parseU64Strict(cmd.array[2].str, last_offset)) {
             return RespWriter::error("invalid replication offset");
         }
-        uint64_t current_offset = replication_backlog_->currentOffset();
-        if (requested_replid != *local_replid_) {
-            return replicationFullResyncResponse(*local_replid_, current_offset);
+        uint64_t current_offset = context_.replication_backlog->currentOffset();
+        if (requested_replid != *context_.local_replid) {
+            return replicationFullResyncResponse(*context_.local_replid, current_offset);
         }
         std::vector<ReplicationBacklogEntry> entries;
-        if (!replication_backlog_->entriesAfter(last_offset, entries)) {
-            return replicationFullResyncResponse(*local_replid_, current_offset);
+        if (!context_.replication_backlog->entriesAfter(last_offset, entries)) {
+            return replicationFullResyncResponse(*context_.local_replid, current_offset);
         }
-        return replicationPsyncResponse(*local_replid_, current_offset, entries);
+        return replicationPsyncResponse(*context_.local_replid, current_offset, entries);
     }
 
     if (cmd_name == "REPLACK") {
@@ -1199,14 +1101,14 @@ std::string CommandHandler::handleReplicationCommand(const std::string& cmd_name
             return RespWriter::error("invalid replication ID");
         }
         std::unique_lock<std::mutex> apply_lock;
-        if (replication_apply_mutex_) {
-            apply_lock = std::unique_lock<std::mutex>(*replication_apply_mutex_);
+        if (context_.replication_apply_mutex) {
+            apply_lock = std::unique_lock<std::mutex>(*context_.replication_apply_mutex);
         }
-        if (!upstream_replid_ || replid != *upstream_replid_) {
+        if (!context_.upstream_replid || replid != *context_.upstream_replid) {
             return RespWriter::error("REPLID mismatch; full resync required");
         }
-        const uint64_t offset = replication_offset_
-                                    ? replication_offset_->load(std::memory_order_acquire)
+        const uint64_t offset = context_.replication_offset
+                                    ? context_.replication_offset->load(std::memory_order_acquire)
                                     : 0;
         return RespWriter::integer(static_cast<long long>(offset));
     }
@@ -1227,14 +1129,14 @@ std::string CommandHandler::handleReplicationCommand(const std::string& cmd_name
         }
 
         std::unique_lock<std::mutex> apply_lock;
-        if (replication_apply_mutex_) {
-            apply_lock = std::unique_lock<std::mutex>(*replication_apply_mutex_);
+        if (context_.replication_apply_mutex) {
+            apply_lock = std::unique_lock<std::mutex>(*context_.replication_apply_mutex);
         }
-        if (!upstream_replid_ || replid != *upstream_replid_) {
+        if (!context_.upstream_replid || replid != *context_.upstream_replid) {
             return RespWriter::error("REPLID mismatch; full resync required");
         }
-        if (replication_offset_) {
-            const uint64_t current = replication_offset_->load(std::memory_order_acquire);
+        if (context_.replication_offset) {
+            const uint64_t current = context_.replication_offset->load(std::memory_order_acquire);
             if (offset <= current) return RespWriter::simpleString("OK");
             if (offset != current + 1) {
                 return RespWriter::error("REPLGAP expected offset " +
@@ -1257,11 +1159,11 @@ std::string CommandHandler::handleReplicationCommand(const std::string& cmd_name
         }
         std::string response = handleReplicationCommand(inner_name, inner);
         if (response.rfind("+OK", 0) == 0) {
-            if (replication_offset_) {
-                replication_offset_->store(offset, std::memory_order_relaxed);
+            if (context_.replication_offset) {
+                context_.replication_offset->store(offset, std::memory_order_relaxed);
             }
-            if (replication_offset_callback_) {
-                replication_offset_callback_(offset);
+            if (context_.replication_offset_callback) {
+                context_.replication_offset_callback(offset);
             }
         }
         return response;
@@ -1291,7 +1193,7 @@ std::string CommandHandler::handleReplicationCommand(const std::string& cmd_name
                        ? RespWriter::error("OOM maxmemory limit reached")
                        : RespWriter::error("allocation failed");
         }
-        if (aof_ && !aof_->appendSet(cmd.array[1].str, cmd.array[2].str, ttl_seconds)) {
+        if (context_.aof && !context_.aof->appendSet(cmd.array[1].str, cmd.array[2].str, ttl_seconds)) {
             MINIREDIS_LOG_ERROR("aof") << "failed to append replicated SET command";
         }
         return RespWriter::simpleString("OK");
@@ -1313,7 +1215,7 @@ std::string CommandHandler::handleReplicationCommand(const std::string& cmd_name
             }
         }
         Stats::instance().recordCommand(cmd_name);
-        if (aof_ && !deleted_keys.empty() && !aof_->appendDel(deleted_keys)) {
+        if (context_.aof && !deleted_keys.empty() && !context_.aof->appendDel(deleted_keys)) {
             MINIREDIS_LOG_ERROR("aof") << "failed to append replicated DEL command";
         }
         return RespWriter::simpleString("OK");
@@ -1333,8 +1235,28 @@ std::string CommandHandler::handleReplicationCommand(const std::string& cmd_name
         }
         bool updated = cache_.expire(cmd.array[1].str, ttl_seconds);
         Stats::instance().recordCommand(cmd_name);
-        if (aof_ && updated && !aof_->appendExpire(cmd.array[1].str, ttl_seconds)) {
+        if (context_.aof && updated && !context_.aof->appendExpire(cmd.array[1].str, ttl_seconds)) {
             MINIREDIS_LOG_ERROR("aof") << "failed to append replicated EXPIRE command";
+        }
+        return RespWriter::simpleString("OK");
+    }
+
+    if (cmd_name == "REPLPEXPIRE") {
+        if (cmd.array.size() != 3 ||
+            cmd.array[1].type != RespType::BULK_STRING ||
+            cmd.array[2].type != RespType::BULK_STRING) {
+            return RespWriter::error("wrong number of arguments for 'replpexpire'");
+        }
+        std::string key_error = validateKey(cmd.array[1]);
+        if (!key_error.empty()) return key_error;
+        int64_t ttl_ms = 0;
+        if (!parsePositiveInt64(cmd.array[2].str, ttl_ms)) {
+            return RespWriter::error("invalid expire time");
+        }
+        bool updated = cache_.pexpire(cmd.array[1].str, ttl_ms);
+        Stats::instance().recordCommand(cmd_name);
+        if (context_.aof && updated && !context_.aof->appendPExpire(cmd.array[1].str, ttl_ms)) {
+            MINIREDIS_LOG_ERROR("aof") << "failed to append replicated PEXPIRE command";
         }
         return RespWriter::simpleString("OK");
     }
@@ -1343,7 +1265,7 @@ std::string CommandHandler::handleReplicationCommand(const std::string& cmd_name
 }
 
 std::string CommandHandler::handleClusterSetSlot(const RespValue& cmd) {
-    if (!cluster_mode_ || !slot_map_ || !slot_map_mutex_) {
+    if (!context_.cluster_mode || !context_.slot_map || !context_.slot_map_mutex) {
         return RespWriter::error("cluster mode is not enabled");
     }
     if (cmd.array.size() < 4 || cmd.array[2].type != RespType::BULK_STRING ||
@@ -1363,20 +1285,20 @@ std::string CommandHandler::handleClusterSetSlot(const RespValue& cmd) {
         if (cmd.array.size() != 4) {
             return RespWriter::error("wrong number of arguments for 'cluster setslot stable'");
         }
-        std::lock_guard<std::mutex> lock(*slot_map_mutex_);
-        ok = slot_map_->SetSlotState(slot, ClusterSlotState::Stable);
+        std::lock_guard<std::mutex> lock(*context_.slot_map_mutex);
+        ok = context_.slot_map->SetSlotState(slot, ClusterSlotState::Stable);
     } else if (action == "NODE" || action == "MIGRATING" || action == "IMPORTING") {
         if (cmd.array.size() != 5 || cmd.array[4].type != RespType::BULK_STRING) {
             return RespWriter::error("wrong number of arguments for 'cluster setslot'");
         }
         const std::string& node = cmd.array[4].str;
-        std::lock_guard<std::mutex> lock(*slot_map_mutex_);
+        std::lock_guard<std::mutex> lock(*context_.slot_map_mutex);
         if (action == "NODE") {
-            ok = slot_map_->SetSlotOwner(slot, node);
+            ok = context_.slot_map->SetSlotOwner(slot, node);
         } else if (action == "MIGRATING") {
-            ok = slot_map_->SetSlotState(slot, ClusterSlotState::Migrating, node);
+            ok = context_.slot_map->SetSlotState(slot, ClusterSlotState::Migrating, node);
         } else {
-            ok = slot_map_->SetSlotState(slot, ClusterSlotState::Importing, node);
+            ok = context_.slot_map->SetSlotState(slot, ClusterSlotState::Importing, node);
         }
     } else {
         return RespWriter::error("unsupported CLUSTER SETSLOT action '" + action + "'");
@@ -1385,12 +1307,12 @@ std::string CommandHandler::handleClusterSetSlot(const RespValue& cmd) {
     if (!ok) {
         return RespWriter::error("invalid CLUSTER SETSLOT target");
     }
-    if (cluster_change_callback_) cluster_change_callback_();
+    if (context_.cluster_change_callback) context_.cluster_change_callback();
     return RespWriter::simpleString("OK");
 }
 
 std::string CommandHandler::handleClusterMigrate(const RespValue& cmd) {
-    if (!cluster_mode_ || !slot_map_ || !slot_map_mutex_) {
+    if (!context_.cluster_mode || !context_.slot_map || !context_.slot_map_mutex) {
         return RespWriter::error("cluster mode is not enabled");
     }
     if (cmd.array.size() != 4 || cmd.array[2].type != RespType::BULK_STRING ||
@@ -1407,26 +1329,26 @@ std::string CommandHandler::handleClusterMigrate(const RespValue& cmd) {
 
     std::vector<std::string> nodes;
     {
-        std::lock_guard<std::mutex> lock(*slot_map_mutex_);
-        std::string owner = slot_map_->GetNodeForSlot(slot);
-        if (owner != current_node_) {
+        std::lock_guard<std::mutex> lock(*context_.slot_map_mutex);
+        std::string owner = context_.slot_map->GetNodeForSlot(slot);
+        if (owner != context_.current_node) {
             return RespWriter::error("slot is not owned by current node");
         }
-        nodes = slot_map_->GetAllNodes();
+        nodes = context_.slot_map->GetAllNodes();
         if (std::find(nodes.begin(), nodes.end(), target_node) == nodes.end() ||
-            target_node == current_node_) {
+            target_node == context_.current_node) {
             return RespWriter::error("invalid migration target node");
         }
-        if (!slot_map_->SetSlotState(slot, ClusterSlotState::Migrating, target_node)) {
+        if (!context_.slot_map->SetSlotState(slot, ClusterSlotState::Migrating, target_node)) {
             return RespWriter::error("failed to mark slot migrating");
         }
     }
-    if (cluster_change_callback_) cluster_change_callback_();
+    if (context_.cluster_change_callback) context_.cluster_change_callback();
 
     std::string response;
     if (!sendClusterCommandToNode(target_node, config_.requirepass,
                                   {"CLUSTER", "SETSLOT", std::to_string(slot),
-                                   "IMPORTING", current_node_},
+                                   "IMPORTING", context_.current_node},
                                   response) ||
         response.rfind("+OK", 0) != 0) {
         return RespWriter::error("failed to mark target importing");
@@ -1444,7 +1366,7 @@ std::string CommandHandler::handleClusterMigrate(const RespValue& cmd) {
             set_command.push_back("EX");
             set_command.push_back(std::to_string(std::max<long long>(ttl_seconds, 1)));
         }
-        if (!sendAskingCommandToNode(target_node, config_.requirepass, set_command, response) ||
+        if (!sendClusterCommandToNode(target_node, config_.requirepass, set_command, response, true) ||
             response.rfind("+OK", 0) != 0) {
             return RespWriter::error("failed to copy key '" + key + "' to target node");
         }
@@ -1452,7 +1374,7 @@ std::string CommandHandler::handleClusterMigrate(const RespValue& cmd) {
     }
 
     for (const auto& node : nodes) {
-        if (node == current_node_) continue;
+        if (node == context_.current_node) continue;
         if (!sendClusterCommandToNode(node, config_.requirepass,
                                       {"CLUSTER", "SETSLOT", std::to_string(slot),
                                        "NODE", target_node},
@@ -1466,16 +1388,16 @@ std::string CommandHandler::handleClusterMigrate(const RespValue& cmd) {
     for (const auto& key : migrated_keys) {
         if (cache_.del(key)) deleted_keys.push_back(key);
     }
-    if (aof_ && !deleted_keys.empty() && !aof_->appendDel(deleted_keys)) {
+    if (context_.aof && !deleted_keys.empty() && !context_.aof->appendDel(deleted_keys)) {
         MINIREDIS_LOG_ERROR("aof") << "failed to append migrated DEL command";
     }
     {
-        std::lock_guard<std::mutex> lock(*slot_map_mutex_);
-        if (!slot_map_->SetSlotOwner(slot, target_node)) {
+        std::lock_guard<std::mutex> lock(*context_.slot_map_mutex);
+        if (!context_.slot_map->SetSlotOwner(slot, target_node)) {
             return RespWriter::error("failed to update local slot owner");
         }
     }
-    if (cluster_change_callback_) cluster_change_callback_();
+    if (context_.cluster_change_callback) context_.cluster_change_callback();
     return RespWriter::integer(static_cast<long long>(migrated_keys.size()));
 }
 
@@ -1500,7 +1422,7 @@ std::string CommandHandler::handleClusterCommand(const RespValue& cmd) {
         if (cmd.array.size() != 2) {
             return RespWriter::error("wrong number of arguments for 'cluster myid'");
         }
-        return RespWriter::bulkString(clusterNodeId(current_node_));
+        return RespWriter::bulkString(clusterNodeId(context_.current_node));
     }
 
     if (subcmd == "COUNTKEYSINSLOT") {
@@ -1533,7 +1455,7 @@ std::string CommandHandler::handleClusterCommand(const RespValue& cmd) {
     }
 
     if (subcmd == "MEET") {
-        if (!cluster_mode_ || !slot_map_ || !slot_map_mutex_) {
+        if (!context_.cluster_mode || !context_.slot_map || !context_.slot_map_mutex) {
             return RespWriter::error("cluster mode is not enabled");
         }
         if (cmd.array.size() != 3 || cmd.array[2].type != RespType::BULK_STRING) {
@@ -1541,40 +1463,40 @@ std::string CommandHandler::handleClusterCommand(const RespValue& cmd) {
         }
         std::string host;
         int port = 0;
-        if (!splitNodeAddr(cmd.array[2].str, host, port)) {
+        if (!parseNodeAddress(cmd.array[2].str, host, port)) {
             return RespWriter::error("invalid node address");
         }
         {
-            std::lock_guard<std::mutex> lock(*slot_map_mutex_);
-            if (!slot_map_->AddNode(cmd.array[2].str)) {
+            std::lock_guard<std::mutex> lock(*context_.slot_map_mutex);
+            if (!context_.slot_map->AddNode(cmd.array[2].str)) {
                 return RespWriter::error("failed to add cluster node");
             }
         }
-        if (cluster_change_callback_) cluster_change_callback_();
+        if (context_.cluster_change_callback) context_.cluster_change_callback();
         return RespWriter::simpleString("OK");
     }
 
     if (subcmd == "FORGET") {
-        if (!cluster_mode_ || !slot_map_ || !slot_map_mutex_) {
+        if (!context_.cluster_mode || !context_.slot_map || !context_.slot_map_mutex) {
             return RespWriter::error("cluster mode is not enabled");
         }
         if (cmd.array.size() != 3 || cmd.array[2].type != RespType::BULK_STRING) {
             return RespWriter::error("wrong number of arguments for 'cluster forget'");
         }
         const std::string& node = cmd.array[2].str;
-        if (node == current_node_) {
+        if (node == context_.current_node) {
             return RespWriter::error("cannot forget myself");
         }
         {
-            std::lock_guard<std::mutex> lock(*slot_map_mutex_);
-            if (slot_map_->NodeOwnsSlots(node)) {
+            std::lock_guard<std::mutex> lock(*context_.slot_map_mutex);
+            if (context_.slot_map->NodeOwnsSlots(node)) {
                 return RespWriter::error("node still owns slots; migrate or reassign slots first");
             }
-            if (!slot_map_->RemoveNode(node)) {
+            if (!context_.slot_map->RemoveNode(node)) {
                 return RespWriter::error("unknown cluster node");
             }
         }
-        if (cluster_change_callback_) cluster_change_callback_();
+        if (context_.cluster_change_callback) context_.cluster_change_callback();
         return RespWriter::simpleString("OK");
     }
 
@@ -1584,40 +1506,39 @@ std::string CommandHandler::handleClusterCommand(const RespValue& cmd) {
         size_t failed_nodes = 0;
         size_t suspect_nodes = 0;
         uint64_t epoch = 0;
-        if (slot_map_ && slot_map_mutex_) {
-            std::lock_guard<std::mutex> lock(*slot_map_mutex_);
-            assigned_slots = slot_map_->AssignedSlotCount();
-            failed_nodes = slot_map_->FailedNodeCount();
-            suspect_nodes = slot_map_->SuspectNodeCount();
-            epoch = slot_map_->GetEpoch();
+        if (context_.slot_map && context_.slot_map_mutex) {
+            std::lock_guard<std::mutex> lock(*context_.slot_map_mutex);
+            assigned_slots = context_.slot_map->AssignedSlotCount();
+            failed_nodes = context_.slot_map->FailedNodeCount();
+            suspect_nodes = context_.slot_map->SuspectNodeCount();
+            epoch = context_.slot_map->GetEpoch();
         }
         std::ostringstream oss;
-        oss << "cluster_enabled:" << (cluster_mode_ ? "1" : "0") << "\r\n";
-        oss << "cluster_state:" << (cluster_mode_ && (nodes.empty() || failed_nodes > 0) ? "fail" : "ok") << "\r\n";
+        oss << "cluster_enabled:" << (context_.cluster_mode ? "1" : "0") << "\r\n";
+        oss << "cluster_state:" << (context_.cluster_mode && (nodes.empty() || failed_nodes > 0) ? "fail" : "ok") << "\r\n";
         oss << "cluster_slots_assigned:" << assigned_slots << "\r\n";
         oss << "cluster_known_nodes:" << nodes.size() << "\r\n";
         oss << "cluster_failed_nodes:" << failed_nodes << "\r\n";
         oss << "cluster_suspect_nodes:" << suspect_nodes << "\r\n";
         oss << "cluster_current_epoch:" << epoch << "\r\n";
-        oss << "cluster_current_node:" << current_node_ << "\r\n";
-        //Redis 的很多 info 类命令会返回一整段文本，所以用 bulk string 很合适。
+        oss << "cluster_current_node:" << context_.current_node << "\r\n";
         //$96\r\ncluster_enabled:1\r\ncluster_state:ok\r\ncluster_known_nodes:2\r\ncluster_current_node:127.0.0.1:6366\r\n\r\n
         return RespWriter::bulkString(oss.str());
     }
 
     if (subcmd == "NODES") {
         auto nodes = clusterNodes();
-        if (cluster_mode_ && nodes.empty()) {
+        if (context_.cluster_mode && nodes.empty()) {
             return RespWriter::error("cluster slot map not initialized");
         }
 
         std::ostringstream oss;
         for (const auto& node : nodes) {
-            bool myself = (node == current_node_);
+            bool myself = (node == context_.current_node);
             ClusterNodeState state = ClusterNodeState::Healthy;
-            if (slot_map_ && slot_map_mutex_) {
-                std::lock_guard<std::mutex> lock(*slot_map_mutex_);
-                state = slot_map_->GetNodeState(node);
+            if (context_.slot_map && context_.slot_map_mutex) {
+                std::lock_guard<std::mutex> lock(*context_.slot_map_mutex);
+                state = context_.slot_map->GetNodeState(node);
             }
             std::string flags = myself
                                     ? (isReplica() ? "myself,slave" : "myself,master")
@@ -1631,21 +1552,21 @@ std::string CommandHandler::handleClusterCommand(const RespValue& cmd) {
                 << node << " "
                 << flags
                 << " - 0 0 0 " << (state == ClusterNodeState::Fail ? "disconnected" : "connected");
-            if (slot_map_ && slot_map_mutex_) {
-                std::lock_guard<std::mutex> lock(*slot_map_mutex_);
-                for (const auto& range : slot_map_->GetSlotRangesForNode(node)) {
+            if (context_.slot_map && context_.slot_map_mutex) {
+                std::lock_guard<std::mutex> lock(*context_.slot_map_mutex);
+                for (const auto& range : context_.slot_map->GetSlotRangesForNode(node)) {
                     oss << " " << range.start;
                     if (range.start != range.end) {
                         oss << "-" << range.end;
                     }
                 }
                 for (uint16_t slot = 0; slot < kRedisClusterSlots; ++slot) {
-                    ClusterSlotMeta meta = slot_map_->GetSlotMeta(slot);
+                    ClusterSlotMeta meta = context_.slot_map->GetSlotMeta(slot);
                     if (meta.state == ClusterSlotState::Migrating &&
-                        slot_map_->GetNodeForSlot(slot) == node) {
+                        context_.slot_map->GetNodeForSlot(slot) == node) {
                         oss << " [" << slot << "->-" << clusterNodeId(meta.peer_node) << "]";
                     } else if (meta.state == ClusterSlotState::Importing &&
-                               node == current_node_) {
+                               node == context_.current_node) {
                         oss << " [" << slot << "-<-" << clusterNodeId(meta.peer_node) << "]";
                     }
                 }
@@ -1657,19 +1578,19 @@ std::string CommandHandler::handleClusterCommand(const RespValue& cmd) {
 
     if (subcmd == "SLOTS") {
         auto nodes = clusterNodes();
-        if (cluster_mode_ && nodes.empty()) {
+        if (context_.cluster_mode && nodes.empty()) {
             return RespWriter::error("cluster slot map not initialized");
         }
 
         std::vector<std::string> slots;
-        if (slot_map_ && slot_map_mutex_) {
-            std::lock_guard<std::mutex> lock(*slot_map_mutex_);
+        if (context_.slot_map && context_.slot_map_mutex) {
+            std::lock_guard<std::mutex> lock(*context_.slot_map_mutex);
             for (const auto& node : nodes) {
                 std::string host;
                 int port = 0;
-                if (!splitNodeAddr(node, host, port)) continue;
+                if (!parseNodeAddress(node, host, port)) continue;
 
-                for (const auto& range : slot_map_->GetSlotRangesForNode(node)) {
+                for (const auto& range : context_.slot_map->GetSlotRangesForNode(node)) {
                     std::string node_info = respArray({
                         RespWriter::bulkString(host),
                         RespWriter::integer(port),
@@ -1687,7 +1608,7 @@ std::string CommandHandler::handleClusterCommand(const RespValue& cmd) {
     }
 
     if (subcmd == "SLOTMAP") {
-        if (!cluster_mode_ || !slot_map_ || !slot_map_mutex_) {
+        if (!context_.cluster_mode || !context_.slot_map || !context_.slot_map_mutex) {
             return RespWriter::error("cluster mode is not enabled");
         }
         if (cmd.array.size() != 2) {
@@ -1695,8 +1616,8 @@ std::string CommandHandler::handleClusterCommand(const RespValue& cmd) {
         }
         ClusterSlotMapSnapshot snapshot;
         {
-            std::lock_guard<std::mutex> lock(*slot_map_mutex_);
-            snapshot = slot_map_->ExportSnapshot();
+            std::lock_guard<std::mutex> lock(*context_.slot_map_mutex);
+            snapshot = context_.slot_map->ExportSnapshot();
         }
         return clusterSlotMapResponse(snapshot);
     }
@@ -1714,7 +1635,7 @@ std::string CommandHandler::handleClusterFailover(const RespValue& cmd) {
             return RespWriter::error("unsupported CLUSTER FAILOVER mode");
         }
     }
-    if (!cluster_mode_ || !slot_map_ || !slot_map_mutex_) {
+    if (!context_.cluster_mode || !context_.slot_map || !context_.slot_map_mutex) {
         return RespWriter::error("cluster slot map not initialized");
     }
     if (config_.automatic_failover) {
@@ -1730,9 +1651,9 @@ std::string CommandHandler::handleClusterFailover(const RespValue& cmd) {
 
     size_t moved_slots = 0;
     {
-        std::lock_guard<std::mutex> lock(*slot_map_mutex_);
-        auto nodes = slot_map_->GetAllNodes();
-        if (std::find(nodes.begin(), nodes.end(), current_node_) == nodes.end()) {
+        std::lock_guard<std::mutex> lock(*context_.slot_map_mutex);
+        auto nodes = context_.slot_map->GetAllNodes();
+        if (std::find(nodes.begin(), nodes.end(), context_.current_node) == nodes.end()) {
             return RespWriter::error("current node is not in cluster slot map");
         }
         if (std::find(nodes.begin(), nodes.end(), config_.replicaof) == nodes.end()) {
@@ -1740,26 +1661,26 @@ std::string CommandHandler::handleClusterFailover(const RespValue& cmd) {
         }
 
         for (uint16_t slot = 0; slot < kRedisClusterSlots; ++slot) {
-            if (slot_map_->GetNodeForSlot(slot) == config_.replicaof) {
-                if (!slot_map_->SetSlotOwner(slot, current_node_)) {
+            if (context_.slot_map->GetNodeForSlot(slot) == config_.replicaof) {
+                if (!context_.slot_map->SetSlotOwner(slot, context_.current_node)) {
                     return RespWriter::error("failed to take over slot " + std::to_string(slot));
                 }
                 ++moved_slots;
             }
         }
-        slot_map_->MarkNodeFailed(config_.replicaof);
-        slot_map_->MarkNodeHealthy(current_node_);
+        context_.slot_map->MarkNodeFailed(config_.replicaof);
+        context_.slot_map->MarkNodeHealthy(context_.current_node);
     }
 
-    if (primary_state_) {
-        primary_state_->store(true, std::memory_order_release);
+    if (context_.primary_state) {
+        context_.primary_state->store(true, std::memory_order_release);
     } else {
         promoted_to_master_.store(true, std::memory_order_release);
     }
-    if (writes_allowed_) writes_allowed_->store(true, std::memory_order_release);
-    if (replica_promoted_callback_) replica_promoted_callback_();
-    if (cluster_change_callback_) cluster_change_callback_();
-    MINIREDIS_LOG_WARN("cluster") << "manual failover promoted " << current_node_
+    if (context_.writes_allowed) context_.writes_allowed->store(true, std::memory_order_release);
+    if (context_.replica_promoted_callback) context_.replica_promoted_callback();
+    if (context_.cluster_change_callback) context_.cluster_change_callback();
+    MINIREDIS_LOG_WARN("cluster") << "manual failover promoted " << context_.current_node
                                   << " from master " << config_.replicaof
                                   << ", took over " << moved_slots << " slots";
     return RespWriter::simpleString("OK");
@@ -1834,7 +1755,8 @@ std::string CommandHandler::handle(const RespValue& cmd, CommandSession& session
     }
 
     if (cmd_name == "REPLSET" || cmd_name == "REPLDEL" ||
-        cmd_name == "REPLEXPIRE" || cmd_name == "REPLSNAPSHOT" ||
+        cmd_name == "REPLEXPIRE" || cmd_name == "REPLPEXPIRE" ||
+        cmd_name == "REPLSNAPSHOT" ||
         cmd_name == "REPLFULLSYNC" || cmd_name == "REPLPSYNC" || cmd_name == "REPLACK" ||
         cmd_name == "REPLAPPLY") {
         Stats::instance().recordCommand(cmd_name);
@@ -1843,18 +1765,18 @@ std::string CommandHandler::handle(const RespValue& cmd, CommandSession& session
 
     if (cmd_name == "REPLFAILOVER") {
         Stats::instance().recordCommand(cmd_name);
-        if (!failover_command_callback_) {
+        if (!context_.failover_command_callback) {
             return RespWriter::error("automatic failover is not enabled");
         }
-        return failover_command_callback_(cmd);
+        return context_.failover_command_callback(cmd);
     }
 
     if (isReplica() && isClientWriteCommand(cmd_name)) {
         Stats::instance().recordCommand(cmd_name);
         return RespWriter::error("READONLY You can't write against a read only replica");
     }
-    if (isClientWriteCommand(cmd_name) && writes_allowed_ &&
-        !writes_allowed_->load(std::memory_order_acquire)) {
+    if (isClientWriteCommand(cmd_name) && context_.writes_allowed &&
+        !context_.writes_allowed->load(std::memory_order_acquire)) {
         Stats::instance().recordCommand(cmd_name);
         return RespWriter::error("MASTERDOWN Quorum unavailable; writes are fenced");
     }
@@ -1895,7 +1817,7 @@ std::string CommandHandler::handle(const RespValue& cmd, CommandSession& session
             return RespWriter::nullBulkString();
         }
         Stats::instance().recordGetHit();
-        if (aof_ && !aof_->appendDel({key_arg.str})) {
+        if (context_.aof && !context_.aof->appendDel({key_arg.str})) {
             MINIREDIS_LOG_ERROR("aof") << "failed to append GETDEL command as DEL";
         }
         replicateWrite({"REPLDEL", key_arg.str});
@@ -1950,16 +1872,15 @@ std::string CommandHandler::handle(const RespValue& cmd, CommandSession& session
         Stats::instance().recordGetHit();
         if (cmd.array.size() != 2) {
             if (persist) {
-                if (aof_ && !aof_->appendSet(key_arg.str, *val, 0)) {
+                if (context_.aof && !context_.aof->appendSet(key_arg.str, *val, 0)) {
                     MINIREDIS_LOG_ERROR("aof") << "failed to append GETEX PERSIST command as SET";
                 }
                 replicateWrite({"REPLSET", key_arg.str, *val, "0"});
             } else {
-                if (aof_ && !aof_->appendPExpire(key_arg.str, ttl_ms)) {
+                if (context_.aof && !context_.aof->appendPExpire(key_arg.str, ttl_ms)) {
                     MINIREDIS_LOG_ERROR("aof") << "failed to append GETEX expire command";
                 }
-                int64_t repl_seconds = (ttl_ms + 999) / 1000;
-                replicateWrite({"REPLEXPIRE", key_arg.str, std::to_string(repl_seconds)});
+                replicateWrite({"REPLPEXPIRE", key_arg.str, std::to_string(ttl_ms)});
             }
         }
         return RespWriter::bulkString(*val);
@@ -2025,7 +1946,7 @@ std::string CommandHandler::handle(const RespValue& cmd, CommandSession& session
         SetResult set_result = cache_.set(key_arg.str, val_arg.str, ttl_seconds);
         Stats::instance().recordSet();
         if (set_result == SetResult::Ok) {
-            if (aof_ && !aof_->appendSet(key_arg.str, val_arg.str, ttl_seconds)) {
+            if (context_.aof && !context_.aof->appendSet(key_arg.str, val_arg.str, ttl_seconds)) {
                 MINIREDIS_LOG_ERROR("aof") << "failed to append SET command";
             }
             replicateWrite({"REPLSET", key_arg.str, val_arg.str, std::to_string(ttl_seconds)});
@@ -2050,7 +1971,7 @@ std::string CommandHandler::handle(const RespValue& cmd, CommandSession& session
             }
         }
         Stats::instance().recordCommand(cmd_name);
-        if (aof_ && !deleted_keys.empty() && !aof_->appendDel(deleted_keys)) {
+        if (context_.aof && !deleted_keys.empty() && !context_.aof->appendDel(deleted_keys)) {
             MINIREDIS_LOG_ERROR("aof") << "failed to append DEL command";
         }
         if (!deleted_keys.empty()) {
@@ -2081,7 +2002,7 @@ std::string CommandHandler::handle(const RespValue& cmd, CommandSession& session
             return RespWriter::error("allocation failed");
         }
         if (result.changed) {
-            if (aof_ && !aof_->appendSet(key_arg.str, result.value, result.ttl_seconds)) {
+            if (context_.aof && !context_.aof->appendSet(key_arg.str, result.value, result.ttl_seconds)) {
                 MINIREDIS_LOG_ERROR("aof") << "failed to append SETNX command as SET";
             }
             replicateWrite({"REPLSET", key_arg.str, result.value, std::to_string(result.ttl_seconds)});
@@ -2108,7 +2029,7 @@ std::string CommandHandler::handle(const RespValue& cmd, CommandSession& session
         if (result.status == SetResult::AllocationFailed) {
             return RespWriter::error("allocation failed");
         }
-        if (aof_ && !aof_->appendSet(key_arg.str, result.value, result.ttl_seconds)) {
+        if (context_.aof && !context_.aof->appendSet(key_arg.str, result.value, result.ttl_seconds)) {
             MINIREDIS_LOG_ERROR("aof") << "failed to append APPEND command as SET";
         }
         replicateWrite({"REPLSET", key_arg.str, result.value, std::to_string(result.ttl_seconds)});
@@ -2157,7 +2078,7 @@ std::string CommandHandler::handle(const RespValue& cmd, CommandSession& session
         if (result.code == IncrementResultCode::AllocationFailed) {
             return RespWriter::error("allocation failed");
         }
-        if (aof_ && !aof_->appendSet(key_arg.str, result.value, result.ttl_seconds)) {
+        if (context_.aof && !context_.aof->appendSet(key_arg.str, result.value, result.ttl_seconds)) {
             MINIREDIS_LOG_ERROR("aof") << "failed to append integer command as SET";
         }
         replicateWrite({"REPLSET", key_arg.str, result.value, std::to_string(result.ttl_seconds)});
@@ -2193,7 +2114,7 @@ std::string CommandHandler::handle(const RespValue& cmd, CommandSession& session
         }
         bool updated = cache_.expire(key_arg.str, ttl_seconds);
         Stats::instance().recordCommand(cmd_name);
-        if (aof_ && updated && !aof_->appendExpire(key_arg.str, ttl_seconds)) {
+        if (context_.aof && updated && !context_.aof->appendExpire(key_arg.str, ttl_seconds)) {
             MINIREDIS_LOG_ERROR("aof") << "failed to append EXPIRE command";
         }
         if (updated) {
@@ -2217,12 +2138,11 @@ std::string CommandHandler::handle(const RespValue& cmd, CommandSession& session
         }
         bool updated = cache_.pexpire(key_arg.str, ttl_ms);
         Stats::instance().recordCommand(cmd_name);
-        if (aof_ && updated && !aof_->appendPExpire(key_arg.str, ttl_ms)) {
+        if (context_.aof && updated && !context_.aof->appendPExpire(key_arg.str, ttl_ms)) {
             MINIREDIS_LOG_ERROR("aof") << "failed to append PEXPIRE command";
         }
         if (updated) {
-            int64_t repl_seconds = (ttl_ms + 999) / 1000;
-            replicateWrite({"REPLEXPIRE", key_arg.str, std::to_string(repl_seconds)});
+            replicateWrite({"REPLPEXPIRE", key_arg.str, std::to_string(ttl_ms)});
         }
         return RespWriter::integer(updated ? 1 : 0);
     }
@@ -2239,7 +2159,7 @@ std::string CommandHandler::handle(const RespValue& cmd, CommandSession& session
         }
         Stats::instance().recordCommand(cmd_name);
         if (updated && val) {
-            if (aof_ && !aof_->appendSet(key_arg.str, *val, 0)) {
+            if (context_.aof && !context_.aof->appendSet(key_arg.str, *val, 0)) {
                 MINIREDIS_LOG_ERROR("aof") << "failed to append PERSIST command as SET";
             }
             replicateWrite({"REPLSET", key_arg.str, *val, "0"});
@@ -2291,10 +2211,10 @@ std::string CommandHandler::handle(const RespValue& cmd, CommandSession& session
         if (cmd.array.size() != 1) {
             return RespWriter::error("wrong number of arguments for 'bgrewriteaof'");
         }
-        if (!aof_) {
+        if (!context_.aof) {
             return RespWriter::error("AOF is not enabled");
         }
-        if (!aof_->rewrite(cache_.snapshot())) {
+        if (!context_.aof->rewrite(cache_.snapshot())) {
             return RespWriter::error("AOF rewrite already running or failed to start");
         }
         return RespWriter::simpleString("Background append only file rewriting started");

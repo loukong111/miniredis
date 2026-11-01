@@ -1,5 +1,7 @@
 #include "miniredis/server/replication_dispatcher.hpp"
+#include "miniredis/cluster/cluster_utils.hpp"
 #include "miniredis/core/logger.hpp"
+#include "miniredis/net/resp_parser.hpp"
 #include "miniredis/metrics/stats.hpp"
 #include "miniredis/server/replication_state.hpp"
 #include <algorithm>
@@ -27,26 +29,6 @@ namespace {
 constexpr int kConnectTimeoutMs = 1500;
 constexpr int kIoTimeoutSec = 2;
 constexpr auto kHeartbeatInterval = std::chrono::seconds(1);
-
-bool splitNodeAddr(const std::string& node, std::string& host, int& port) {
-    size_t pos = node.rfind(':');
-    if (pos == std::string::npos || pos == 0 || pos + 1 >= node.size()) return false;
-    host = node.substr(0, pos);
-    const char* begin = node.data() + pos + 1;
-    const char* end = node.data() + node.size();
-    auto [ptr, ec] = std::from_chars(begin, end, port);
-    return ec == std::errc() && ptr == end && port > 0 && port <= 65535;
-}
-
-std::string encodeRespCommand(const std::vector<std::string>& command) {
-    std::string out = "*" + std::to_string(command.size()) + "\r\n";
-    for (const auto& part : command) {
-        out += "$" + std::to_string(part.size()) + "\r\n";
-        out += part;
-        out += "\r\n";
-    }
-    return out;
-}
 
 bool writeAll(int fd, const std::string& data) {
     size_t written = 0;
@@ -283,7 +265,7 @@ void ReplicationDispatcher::workerLoop(Worker& worker) {
 bool ReplicationDispatcher::connectReplica(Worker& worker) {
     std::string host;
     int port = 0;
-    if (!splitNodeAddr(worker.node, host, port)) {
+    if (!parseNodeAddress(worker.node, host, port)) {
         recordFailure(worker, "invalid replica address");
         return false;
     }
@@ -348,7 +330,7 @@ bool ReplicationDispatcher::connectReplica(Worker& worker) {
 
     std::string response;
     if (!password_.empty() &&
-        (!writeAll(fd, encodeRespCommand({"AUTH", password_})) ||
+        (!writeAll(fd, RespWriter::array({"AUTH", password_})) ||
          !readLine(fd, response) || response.rfind("+OK", 0) != 0)) {
         recordFailure(worker, "replica authentication failed");
         disconnect(worker);
@@ -364,7 +346,7 @@ bool ReplicationDispatcher::queryReplicaOffset(Worker& worker, uint64_t& offset,
                                                bool& replid_mismatch) {
     replid_mismatch = false;
     const int fd = worker.fd.load(std::memory_order_acquire);
-    if (fd < 0 || !writeAll(fd, encodeRespCommand({"REPLACK", master_replid_}))) {
+    if (fd < 0 || !writeAll(fd, RespWriter::array({"REPLACK", master_replid_}))) {
         return false;
     }
     std::string response;
@@ -383,7 +365,7 @@ bool ReplicationDispatcher::sendEntry(Worker& worker,
     command.insert(command.end(), entry.command.begin(), entry.command.end());
 
     const int fd = worker.fd.load(std::memory_order_acquire);
-    if (fd < 0 || !writeAll(fd, encodeRespCommand(command))) return false;
+    if (fd < 0 || !writeAll(fd, RespWriter::array(command))) return false;
     std::string response;
     return readLine(fd, response) && response.rfind("+OK", 0) == 0;
 }
