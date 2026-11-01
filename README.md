@@ -31,7 +31,7 @@ curl -fsS http://127.0.0.1:8080/readyz
 MINIREDIS_REQUIREPASS=change-me docker compose up --build
 ```
 
-配置、命令和 Qt Console 构建方法见 [使用指南](docs/usage.md)。安装、备份和故障处理见 [部署与运维](docs/ops-runbook.md)。
+配置、命令和桌面端启动方法见 [使用指南](docs/usage.md)。安装、备份和故障处理见 [部署与运维](docs/ops-runbook.md)。
 
 ## 功能范围
 
@@ -44,11 +44,19 @@ MINIREDIS_REQUIREPASS=change-me docker compose up --build
 | 可观测性 | `/healthz`、`/readyz`、JSON `/stats`、Prometheus `/metrics`、INFO、SLOWLOG |
 | 复制与故障转移 | 异步复制、replid/offset 校验、backlog 追平、静态成员组多数派选主和写入隔离 |
 | 实验性集群 | slot 路由、MOVED/ASK、slot 迁移、拓扑保存及手动接管 |
-| 管理与部署 | 可选 Qt Console、Docker、systemd、安装及备份脚本 |
+| 管理与部署 | Vue + Electron 桌面端、Docker、systemd、安装及备份脚本 |
 
-Qt Console 提供命令工作区、服务管理、复制与集群演示、运行监控和压测入口，可独立构建并连接 Linux 服务端。
+桌面端使用 Vue 3、TypeScript 和 Electron，提供命令编辑器、独立连接会话、运行监控、复制与集群视图，以及本地实例和脚本任务入口。默认浅色，也支持深色主题。
 
-![Qt Console](docs/images/qt-console.png)
+先构建服务端，再使用 Node.js 24+ 启动桌面端：
+
+```bash
+cd tools/desktop
+npm ci
+npm run dev
+```
+
+![MiniRedis Desktop](docs/images/desktop-workbench.png)
 
 ## 项目结构
 
@@ -57,7 +65,7 @@ src/                服务端实现：core、net、persistence、metrics、clust
 include/miniredis/  对应模块的头文件
 config/             本地与部署配置示例
 tests/              单元测试和黑盒集成测试
-tools/qt_console/   可选 Qt 管理端
+tools/desktop/      Vue 3 + TypeScript + Electron 桌面管理端
 scripts/            压测、恢复验证和多节点演示
 deploy/             安装、备份、systemd 和日志轮转
 docs/               使用、设计、运维和验证文档
@@ -74,12 +82,12 @@ docs/               使用、设计、运维和验证文档
 | slot 路由、迁移与接管 | [Cluster 模式](docs/cluster.md) |
 | 测试、sanitizer 与压测方法 | [测试与压测](docs/testing-benchmark.md) |
 | 压测环境与历史样本 | [压测报告](docs/benchmark-report.md) |
-| Qt 操作与演示步骤 | [演示指南](docs/demo-guide.md) |
+| 桌面端操作与演示步骤 | [演示指南](docs/demo-guide.md) |
 
 ## 使用边界
 
 - 支持 String/KV 命令子集，未实现 List、Hash、Set、ZSet 等数据结构；ACL 也只支持项目定义的语法。
-- 原生服务端依赖 Linux 的 epoll/eventfd。Qt 管理端使用跨平台 Qt API；当前 CI 只验证 Linux 构建，Windows/macOS 需另行验证。
+- 原生服务端依赖 Linux 的 epoll/eventfd。桌面端通过 RESP/HTTP 连接服务端；当前 CI 验证 Linux，Windows/macOS 的构建与打包需另行验证。
 - 未实现 TLS，部署时应限制到可信网络，并配置认证。
 - 复制是异步的，主节点故障时可能丢失尚未到达副本的写入。自动选主面向静态小规模成员组，未实现成员动态变更或完整共识日志。
 - 复制与集群协议不兼容完整 Redis PSYNC2、Sentinel 或 Cluster gossip；集群功能仍属实验性质。

@@ -1,0 +1,62 @@
+{
+  "name": "miniredis-desktop",
+  "version": "1.0.0",
+  "private": true,
+  "description": "MiniRedis desktop workspace",
+  "type": "module",
+  "main": "out/main/index.js",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "npm run typecheck && electron-vite build",
+    "start": "electron-vite preview",
+    "typecheck": "vue-tsc --noEmit",
+    "test": "vitest run",
+    "test:desktop": "node tests/desktop-smoke.mjs",
+    "package": "npm run build && electron-builder --dir",
+    "postinstall": "install-electron"
+  },
+  "devDependencies": {
+    "@lucide/vue": "^1.66.0",
+    "@types/node": "^24.0.0",
+    "@vitejs/plugin-vue": "^6.0.10",
+    "electron": "^45.2.1",
+    "electron-builder": "^26.18.0",
+    "electron-vite": "^6.0.0",
+    "monaco-editor": "^0.57.0",
+    "naive-ui": "^2.45.3",
+    "playwright": "^1.64.1",
+    "prettier": "^3.9.10",
+    "typescript": "^6.0.3",
+    "vite": "^8.3.5",
+    "vitest": "^5.0.5",
+    "vue": "^3.5.44",
+    "vue-tsc": "^3.3.14"
+  },
+  "build": {
+    "appId": "dev.miniredis.desktop",
+    "productName": "MiniRedis Desktop",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "out/**/*",
+      "resources/**/*",
+      "package.json"
+    ],
+    "linux": {
+      "category": "Development",
+      "icon": "resources/icon.png"
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "mac": {
+      "category": "public.app-category.developer-tools"
+    },
+    "electronDist": "node_modules/electron/dist"
+  },
+  "author": "loukong111"
+}

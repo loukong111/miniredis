@@ -27,7 +27,6 @@ jobs:
         run: |
           cmake -S . -B build \
             -DCMAKE_BUILD_TYPE=Release \
-            -DMINIREDIS_BUILD_QT_CONSOLE=OFF \
             -DMINIREDIS_ENABLE_INTEGRATION_TESTS=ON
 
       - name: Build
@@ -62,7 +61,6 @@ jobs:
         run: |
           cmake -S . -B build-sanitize \
             -DCMAKE_BUILD_TYPE=Debug \
-            -DMINIREDIS_BUILD_QT_CONSOLE=OFF \
             -DMINIREDIS_ENABLE_INTEGRATION_TESTS=ON \
             -DMINIREDIS_ENABLE_ASAN=ON \
             -DMINIREDIS_ENABLE_UBSAN=ON
@@ -103,37 +101,46 @@ jobs:
       - name: Check platform build boundary
         run: scripts/check_platform_build.sh
 
-  qt-console-build:
+  desktop-test:
     runs-on: ubuntu-24.04
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: tools/desktop/package-lock.json
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential \
-            cmake \
-            qt6-base-dev \
-            qt6-qpa-plugins
-
-      - name: Configure Qt-only client
+            build-essential cmake curl redis-tools python3 xvfb xauth \
+            libgtk-3-0 libnss3 libasound2t64 libgbm1 fonts-noto-cjk
+          npm ci --prefix tools/desktop
+      - name: Build server for desktop integration
         run: |
-          cmake -S . -B build-qt-client \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DMINIREDIS_BUILD_SERVER=OFF \
-            -DMINIREDIS_BUILD_TESTS=OFF \
-            -DMINIREDIS_BUILD_QT_CONSOLE=ON
-
-      - name: Build Qt Console
-        run: cmake --build build-qt-client -j"$(nproc)"
-
-      - name: Render Qt views offscreen
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+            -DMINIREDIS_BUILD_TESTS=OFF -DMINIREDIS_ENABLE_MYSQL_DISCOVERY=OFF
+          cmake --build build -j"$(nproc)"
+      - name: Desktop backend tests
         env:
-          QT_QPA_PLATFORM: offscreen
-        run: |
-          build-qt-client/tools/qt_console/miniredis_qt_console \
-            --export-screenshots /tmp/miniredis-qt-screens
-          test "$(find /tmp/miniredis-qt-screens -maxdepth 1 -name '*.png' | wc -l)" -eq 6
+          MINIREDIS_TEST_BINARY: ../../build/miniredis
+        run: npm test --prefix tools/desktop
+      - name: Build desktop
+        run: npm run build --prefix tools/desktop
+      - name: Package desktop
+        working-directory: tools/desktop
+        run: npx electron-builder --dir
+      - name: Desktop UI smoke
+        env:
+          MINIREDIS_TEST_NO_SANDBOX: '1'
+          MINIREDIS_TEST_ELECTRON: ${{ github.workspace }}/tools/desktop/release/linux-unpacked/miniredis-desktop
+          MINIREDIS_SCREENSHOTS: /tmp/miniredis-desktop-screens
+        run: xvfb-run -a npm run test:desktop --prefix tools/desktop
+      - name: Upload desktop screenshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-screenshots
+          path: /tmp/miniredis-desktop-screens

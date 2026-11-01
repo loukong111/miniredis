@@ -7,7 +7,7 @@
 #include <utility>
 
 static_assert(miniredis::platform::kServerSupported,
-              "MiniRedis server currently requires Linux. Build the Qt console on non-Linux platforms.");
+              "MiniRedis server currently requires Linux. Build the independent desktop client on non-Linux platforms.");
 
 int main(int argc, char* argv[]) {
     miniredis::AppConfig config;

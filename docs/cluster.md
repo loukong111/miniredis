@@ -180,15 +180,10 @@ CREATE TABLE IF NOT EXISTS cluster_nodes (
 );
 ```
 
-## Qt 演示
+## 桌面端操作
 
-Qt Console 可以一键启动 3 节点 cluster demo，并可停止其中一个节点演示 `master,pfail` 到 `master,fail`。演示中心提供自动故障转移验证入口；Cluster 页提供迁移、`SETSLOT` 和 `MIGRATE` 操作。收到 `MOVED <slot> <node>` 后，Qt 客户端可以自动切换到目标节点并重试上一条命令。
+侧栏“本地实例”选择三节点集群模式，启动后在“复制与集群”查看节点、slot 和健康状态。可以在本地实例面板停止某个受管节点，观察 `pfail` 到 `fail` 的变化。
 
-## 当前限制
+拓扑页面提供加入节点、slot 迁移和满足条件时的手动接管入口；其他诊断命令可在工作台运行。连接配置启用自动重定向后，客户端会对产生 MOVED/ASK 的那条命令重试，最多三次，并在响应中显示路径。
 
-当前 cluster 模式解决的是请求路由、重定向、节点可观测、拓扑维护、简单 slot 迁移和固定成员组故障接管，不提供：
-
-- Redis Cluster 完整异步迁移和回滚
-- 动态成员变更、自动副本补充和跨机房仲裁
-- Redis Cluster gossip、Sentinel 兼容或完整共识协议
-- Redis Cluster 完整协议兼容
+侧栏“任务中心”的集群验证任务会运行项目脚本，在独立端口与数据目录中检查路由和迁移，输出显示在底部日志。

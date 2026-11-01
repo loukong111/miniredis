@@ -64,8 +64,8 @@ assert_eq() {
 }
 
 run_auth_kv_stats_snapshot_smoke() {
-  local port=17666
-  local stats_port=18081
+  local port="${SMOKE_PORT:-17666}"
+  local stats_port="${SMOKE_STATS_PORT:-18081}"
   local snapshot="${TMPDIR}/snapshot_auth.dat"
   local log="${TMPDIR}/auth.log"
 
@@ -190,8 +190,8 @@ run_auth_kv_stats_snapshot_smoke() {
 }
 
 run_cluster_smoke() {
-  local port=17667
-  local stats_port=18082
+  local port="${SMOKE_CLUSTER_PORT:-17667}"
+  local stats_port="${SMOKE_CLUSTER_STATS_PORT:-18082}"
   local snapshot="${TMPDIR}/snapshot_cluster.dat"
   local log="${TMPDIR}/cluster.log"
 

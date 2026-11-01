@@ -26,3 +26,8 @@ cluster_*.conf
 # Local AI assistant workspace/cache
 .codex/
 .agents/
+
+# Desktop frontend dependencies and generated packages
+node_modules/
+tools/desktop/out/
+tools/desktop/release/

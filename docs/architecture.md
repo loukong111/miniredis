@@ -15,7 +15,7 @@ src/
 ├── cluster/        # slot 路由、拓扑与节点状态
 └── server/         # 配置、命令处理和服务生命周期
 tests/              # 单元测试与黑盒集成测试
-tools/qt_console/   # 可独立构建的跨平台管理端
+tools/desktop/      # Vue + TypeScript + Electron 桌面端
 config/             # 开发与生产配置样例
 deploy/             # systemd、logrotate、安装和备份脚本
 scripts/            # 压测、恢复、复制与集群验证脚本
@@ -33,13 +33,13 @@ docs/               # 架构、部署、运维与测试文档
 | `server` | 认证授权、命令语义、复制和服务生命周期；通过具名 `CommandContext` 注入可选依赖 |
 | `metrics` | 指标采集、快照和 HTTP 导出 |
 
-扩展命令时需同步处理命令元信息、权限、路由、AOF 和复制语义，并补充相应行为测试。源码按职责分层；可选 Qt 管理端保持独立，不链接 Linux runtime。
+扩展命令时需同步处理命令元信息、权限、路由、AOF 和复制语义，并补充相应行为测试。源码按职责分层；桌面管理端保持独立，不链接 Linux runtime。
 
 ## 核心流程
 
 ```mermaid
 flowchart LR
-    C[redis-cli / Qt Console / benchmark] --> L[listen socket]
+    C[redis-cli / Desktop / benchmark] --> L[listen socket]
     L --> A[accept reactor]
     A --> W1[worker reactor 1]
     A --> W2[worker reactor N]
@@ -210,8 +210,25 @@ stats HTTP server 是轻量同步实现，面向健康检查和低频监控。�
 
 指标覆盖命令数、命中率、连接及拒绝数、延迟、内存额度与淘汰、资源限制、快照、AOF rewrite 和复制状态。接口使用方式见 [使用指南](usage.md)，部署监控和排障见 [部署与运维](ops-runbook.md)。
 
+## 桌面端边界
+
+`tools/desktop/src` 按运行环境分成四层：
+
+- `renderer`：Vue 页面、Monaco 编辑器和会话视图状态；使用 Naive UI 表单与对话框，不直接访问 Node.js。
+- `preload`：暴露明确的 IPC 方法和事件订阅，不提供通用 shell、文件读取或原始 IPC。
+- `main`：RESP 增量解析、按连接串行执行、认证与重定向、HTTP 采样、配置及密码存储、受管进程。
+- `shared`：跨边界类型、命令文本解析和响应格式化。
+
+BrowserWindow 开启沙箱、上下文隔离和 Web 安全，关闭 Node 集成。生产页面通过受限的 `app://desktop` 协议加载；禁止页面外部导航、新窗口和权限请求，IPC 校验调用来源。
+
+每个连接维护自己的命令队列和取消状态。响应按协议帧逐条交付，重复响应保留；超时关闭对应传输，防止迟到响应被配给下一条命令。MOVED/ASK 仅重试产生重定向的命令，并保留原连接作为监控对象。自动重定向最多三次，不自动重试传输错误中的写命令。
+
+本地进程异步启动和等待就绪，启动取消会回收已创建的节点。脚本任务限定为项目中的七个入口，参数经校验，通过独立端口、工作目录与进程组运行。日志有条数和单条长度上限；应用退出等待受管进程停止。
+
+监控从 `/stats`、`/healthz` 和 `/readyz` 采集，吞吐按命令计数增量计算；第一条样本不生成 QPS。采样失效时丢弃旧连接的请求结果，错误显示为未知数据。图表不填充演示值。
+
 ## 当前维护重点
 
-`command_handler.cpp`、`server.cpp` 和 Qt 的 `monitor_window.cpp` 仍承担较多职责。继续演进时，应按实际功能变更提取命令分组、复制生命周期和界面组件；暂时保留现有模块边界，避免仅为降低行数增加转发层和零散文件。
+`command_handler.cpp` 和 `server.cpp` 仍承担较多职责。继续演进时，应按实际功能变更提取命令分组和复制生命周期，避免仅为降低行数增加转发层和零散文件。
 
 并发与恢复验证统一见 [测试与压测](testing-benchmark.md)。复制选举约束见 [复制机制](replication.md)，slot 迁移约束见 [Cluster 模式](cluster.md)。

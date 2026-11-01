@@ -8,7 +8,6 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # 项目通过 option 控制测试维度，实现“开发构建”和“CI 构建”分离。
 option(MINIREDIS_ENABLE_INTEGRATION_TESTS "Enable redis-cli/curl based integration tests" ON)
-option(MINIREDIS_BUILD_QT_CONSOLE "Build the optional Qt demo console" OFF)
 option(MINIREDIS_ENABLE_MYSQL_DISCOVERY "Build optional MySQL-backed cluster discovery" ON)
 option(MINIREDIS_ENABLE_ASAN "Enable AddressSanitizer" OFF)
 option(MINIREDIS_ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)
@@ -28,8 +27,7 @@ option(MINIREDIS_BUILD_TESTS "Build MiniRedis unit/integration tests" ${MINIREDI
 if(MINIREDIS_BUILD_SERVER AND NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
     message(FATAL_ERROR
         "MiniRedis server currently requires Linux because it uses epoll/eventfd/POSIX sockets. "
-        "On Windows/macOS, configure with -DMINIREDIS_BUILD_SERVER=OFF "
-        "and -DMINIREDIS_BUILD_QT_CONSOLE=ON to build the cross-platform Qt console."
+        "Build the independent desktop client in tools/desktop with Node.js instead."
     )
 endif()
 
@@ -126,10 +124,6 @@ if(MINIREDIS_BUILD_SERVER)
     add_executable(miniredis src/app/main.cpp)
     target_link_libraries(miniredis PRIVATE miniredis_runtime)
     miniredis_apply_sanitizers(miniredis)
-endif()
-
-if(MINIREDIS_BUILD_QT_CONSOLE)
-    add_subdirectory(tools/qt_console)
 endif()
 
 if(MINIREDIS_BUILD_TESTS)

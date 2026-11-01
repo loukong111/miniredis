@@ -14,6 +14,6 @@ inline constexpr const char* kServerPlatform = "unsupported";
 
 inline constexpr const char* kServerPortabilityNote =
     "MiniRedis server targets Linux because its reactor backend uses epoll/eventfd/POSIX sockets. "
-    "Use Docker or a remote Linux server with the cross-platform Qt console on Windows/macOS.";
+    "Use Docker or a remote Linux server with the desktop client on Windows/macOS.";
 
 }  // namespace miniredis::platform

@@ -2,17 +2,16 @@
 
 ## 平台与构建
 
-服务端依赖 Linux 的 `epoll`、`eventfd` 和 POSIX socket；Windows/macOS 可通过 Docker 或远程 Linux 运行服务端。Qt Console 可以独立构建，只通过 RESP/HTTP 与服务端通信。当前 CI 验证 Linux 服务端和 Qt 客户端，其他平台尚需验证。
+服务端依赖 Linux 的 `epoll`、`eventfd` 和 POSIX socket；Windows/macOS 可通过 Docker 或远程 Linux 运行服务端。桌面端使用 Vue 3、TypeScript 和 Electron，通过 RESP/HTTP 与服务端通信，独立于 CMake 构建。当前 CI 验证 Linux，其他平台尚需验证。
 
 | 构建选项 | Linux 默认值 | 非 Linux 默认值 |
 | :--- | :--- | :--- |
 | `MINIREDIS_BUILD_SERVER` | ON | OFF |
 | `MINIREDIS_BUILD_TESTS` | ON | OFF |
-| `MINIREDIS_BUILD_QT_CONSOLE` | OFF | OFF |
 
-在非 Linux 平台强制开启服务端或测试时，CMake 会报错。可用 `scripts/check_platform_build.sh` 检查服务端与独立客户端的构建边界。
+在非 Linux 平台强制开启服务端或测试时，CMake 会报错。可用 `scripts/check_platform_build.sh` 检查 CMake 在关闭服务端和测试后的构建边界。
 
-依赖：CMake 3.20+、支持 C++20 的编译器；Qt Console 额外需要 Qt6 Core/Widgets/Network。集成测试需要 Bash、`redis-cli`、`curl`，原始协议测试需要 Python 3；压测需要 `redis-benchmark`。
+依赖：CMake 3.20+、支持 C++20 的编译器；桌面端额外需要 Node.js 24+ 和 npm。集成测试需要 Bash、`redis-cli`、`curl`，原始协议测试需要 Python 3；压测需要 `redis-benchmark`。
 
 MySQL 节点发现是可选功能，本地构建检测到 `mysqlclient` 时启用。使用 `-DMINIREDIS_ENABLE_MYSQL_DISCOVERY=OFF` 可生成不依赖该运行库的二进制；发布脚本和 Docker 镜像默认关闭它。
 
@@ -22,20 +21,30 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-构建 Qt Console：
+启动桌面端（先在项目根目录构建服务端）：
 
 ```bash
-cmake -S . -B build-qt \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DMINIREDIS_BUILD_SERVER=OFF \
-  -DMINIREDIS_BUILD_TESTS=OFF \
-  -DMINIREDIS_BUILD_QT_CONSOLE=ON
-
-cmake --build build-qt -j
-./build-qt/tools/qt_console/miniredis_qt_console
+cd tools/desktop
+npm ci
+npm run dev
 ```
 
-Qt Console 提供命令工作区、服务管理、诊断监控和自动验证入口。具体操作见 [演示指南](demo-guide.md)，压测脚本参数见 [测试与压测](testing-benchmark.md)。
+构建并运行发布版本：
+
+```bash
+npm run build
+npm start
+```
+
+生成当前平台的未安装包目录：`npm run package`，输出在 `tools/desktop/release/`。Linux 包需要桌面环境；CI 使用 Xvfb 验证界面。客户端不会打包 Linux 服务端程序；本地实例页面可选择已构建的 `miniredis`。
+
+桌面端包含命令工作台、运行监控、复制与集群三个页面，本地实例、任务中心和设置在侧栏打开。具体操作见 [演示指南](demo-guide.md)。监控端口独立配置，HTTP 失败会显示错误和缺失值。当前服务端没有 SCAN/KEYS 枚举接口，因此客户端没有 Key 浏览器。
+
+连接信息保存在 Electron 的用户数据目录。系统密钥环可用时，加密保存密码；密钥环不可用（包括 Linux `basic_text`）时，密码仅在本次进程中保留，重启后需要重新输入。AUTH 参数不会加入命令历史或响应标题。命令文本和执行结果保存在本次界面会话中，关闭窗口后不恢复。
+
+本地实例和验证脚本仅支持 Linux。任务中心还需要源码目录、Bash、`redis-cli`、`redis-benchmark`、`curl` 和 Python 3；运行已知脚本并为每次任务分配独立数据目录和端口。任务参数可在侧栏调整，输出在底部日志查看。关闭应用会停止它启动的实例与任务进程组。
+
+开发与测试可通过 `MINIREDIS_PROJECT_ROOT` 指定源码根目录，通过 `MINIREDIS_DESKTOP_DATA` 指定独立的客户端数据目录。
 
 ## 本地运行
 

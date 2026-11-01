@@ -30,7 +30,24 @@ ctest --test-dir build --output-on-failure
 - resource/failure smoke，覆盖 maxmemory、LRU、AOF rewrite、AOF 坏尾和 rewrite tmp 清理
 - Debug + ASan/UBSan 全套 CTest，包括三节点自动故障转移和原始协议边界测试
 - Docker image build、服务端与客户端构建边界检查
-- Qt 独立客户端构建与离屏截图验证
+- 桌面端 TypeScript 检查、构建、协议与进程测试，以及 Xvfb 中的 Electron 界面验证
+
+## 桌面端验证
+
+先构建服务端，再在 `tools/desktop` 执行：
+
+```bash
+npm ci
+MINIREDIS_TEST_BINARY=../../build/miniredis npm test
+npm run build
+npm run test:desktop
+```
+
+无桌面的 Linux 环境使用 `xvfb-run -a npm run test:desktop`。只有在 CI 容器无法提供 Chromium 沙箱时，为测试命令设置 `MINIREDIS_TEST_NO_SANDBOX=1`；应用日常启动不需要该参数。
+
+后端测试覆盖 RESP 拆包、重复响应、UTF-8 字节长度、非法帧、脚本预校验、AUTH 脱敏、MOVED/ASK 对应命令、认证失败、超时与取消、密码存储、本地实例和任务进程组清理。真实服务测试读取 RESP、监控与复制信息。
+
+界面验证通过 Playwright 启动 Electron 和真实主从实例，操作 Monaco、运行多行命令、核对重复响应、剪贴板、监控与 Prometheus、复制拓扑、主题及本地实例视图，并验证退出后服务进程已经结束。默认使用临时用户数据目录，测试截图通过 `MINIREDIS_SCREENSHOTS` 指定输出目录；不会读取个人连接或密码。
 
 ## 集成测试覆盖
 

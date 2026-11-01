@@ -9,6 +9,9 @@ HOST="${HOST:-127.0.0.1}"
 MASTER_PORT="${MASTER_PORT:-6386}"
 REPLICA1_PORT="${REPLICA1_PORT:-6387}"
 REPLICA2_PORT="${REPLICA2_PORT:-6388}"
+MASTER_STATS_PORT="${MASTER_STATS_PORT:-18086}"
+REPLICA1_STATS_PORT="${REPLICA1_STATS_PORT:-18087}"
+REPLICA2_STATS_PORT="${REPLICA2_STATS_PORT:-18088}"
 PASSWORD="${PASSWORD:-failover-secret}"
 
 MASTER="${HOST}:${MASTER_PORT}"
@@ -160,9 +163,9 @@ smoke() {
   trap stop_all EXIT
 
   echo "[1/7] starting a three-node failover group"
-  start_node master "${MASTER_PORT}" 18086
-  start_node replica1 "${REPLICA1_PORT}" 18087 "${MASTER}"
-  start_node replica2 "${REPLICA2_PORT}" 18088 "${MASTER}"
+  start_node master "${MASTER_PORT}" "${MASTER_STATS_PORT}"
+  start_node replica1 "${REPLICA1_PORT}" "${REPLICA1_STATS_PORT}" "${MASTER}"
+  start_node replica2 "${REPLICA2_PORT}" "${REPLICA2_STATS_PORT}" "${MASTER}"
 
   echo "[2/7] waiting for the initial master to obtain quorum"
   for _ in $(seq 1 80); do
@@ -192,7 +195,7 @@ smoke() {
   echo "replication result: key=ha:after, master=${REPLICA1}, replica=${REPLICA2}, value=elected"
 
   echo "[5/7] restarting the old master as a replica"
-  start_node master "${MASTER_PORT}" 18086
+  start_node master "${MASTER_PORT}" "${MASTER_STATS_PORT}"
   wait_role "${MASTER_PORT}" slave
   for _ in $(seq 1 100); do
     if [[ "$(info_value "${MASTER_PORT}" master_node 2>/dev/null || true)" == "${REPLICA1}" ]]; then

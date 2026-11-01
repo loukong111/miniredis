@@ -9,3 +9,7 @@ docs/images/*.png
 *.dat.tmp
 Dockerfile
 docker-compose.yml
+
+tools/desktop/node_modules
+tools/desktop/out
+tools/desktop/release
