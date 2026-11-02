@@ -7,6 +7,20 @@ import {
 } from "../src/shared/commands";
 
 describe("RESP framing", () => {
+  it("rejects oversized frames and malformed numeric headers", () => {
+    expect(() =>
+      new RespDecoder().feed(Buffer.alloc(64 * 1024 * 1024 + 1)),
+    ).toThrow("64 MiB");
+    for (const wire of [
+      "$67108865\r\n",
+      "*9007199254740992\r\n",
+      ":not-a-number\r\n",
+      "$1.5\r\n",
+      "+" + "x".repeat(4097) + "\r\n",
+    ])
+      expect(() => new RespDecoder().feed(Buffer.from(wire))).toThrow();
+    expect(new RespDecoder().feed(Buffer.alloc(0))).toEqual([]);
+  });
   it("decodes split UTF-8 and keeps identical pipelined responses", () => {
     const bytes = Buffer.from(
       "$6\r\n你好\r\n+OK\r\n+OK\r\n:9223372036854775807\r\n",
@@ -57,6 +71,22 @@ describe("RESP framing", () => {
 });
 
 describe("command scripts", () => {
+  it("handles quoted comments and controls while rejecting incomplete or excessive scripts", () => {
+    expect(
+      parseScript(String.raw`SET empty ''
+SET value "a\tb\r\0\x41"
+SET hash '#literal'`),
+    ).toEqual([
+      ["SET", "empty", ""],
+      ["SET", "value", "a\tb\r\0A"],
+      ["SET", "hash", "#literal"],
+    ]);
+    expect(() => parseScript("SET a value\\")).toThrow("转义");
+    expect(() => parseScript("# no commands")).toThrow("没有可执行");
+    expect(() => parseScript("x".repeat(1024 * 1024 + 1))).toThrow("1 MiB");
+    expect(displayCommand(["SET", "space key", ""])).toBe('SET "space key" ""');
+    expect(textResponse({ type: "array", value: [] })).toBe("(empty array)");
+  });
   it("handles empty quoted arguments, comments and escapes", () => {
     expect(
       parseScript('# demo\nSET "a b" ""\nSET unicode "你好\\nnext\\x21"'),

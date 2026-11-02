@@ -38,9 +38,10 @@ ctest --test-dir build --output-on-failure
 
 ```bash
 npm ci
-MINIREDIS_TEST_BINARY=../../build/miniredis npm test
+MINIREDIS_TEST_BINARY=../../build/miniredis npm run test:coverage
 npm run build
 npm run test:desktop
+npm run test:branches
 ```
 
 无桌面的 Linux 环境使用 `xvfb-run -a npm run test:desktop`。只有在 CI 容器无法提供 Chromium 沙箱时，为测试命令设置 `MINIREDIS_TEST_NO_SANDBOX=1`；应用日常启动不需要该参数。
@@ -48,6 +49,21 @@ npm run test:desktop
 后端测试覆盖 RESP 拆包、重复响应、UTF-8 字节长度、非法帧、脚本预校验、AUTH 脱敏、MOVED/ASK 对应命令、认证失败、超时与取消、密码存储、本地实例和任务进程组清理。真实服务测试读取 RESP、监控与复制信息。
 
 界面验证通过 Playwright 启动 Electron 和真实主从实例，操作 Monaco、运行多行命令、核对重复响应、剪贴板、监控与 Prometheus、复制拓扑、主题及本地实例视图，并验证退出后服务进程已经结束。默认使用临时用户数据目录，测试截图通过 `MINIREDIS_SCREENSHOTS` 指定输出目录；不会读取个人连接或密码。
+
+`test:branches` 逐项验证连接管理、选区/多行命令、响应与历史、监控与 Prometheus、集群迁移和接管、四种本地运行模式、七种脚本任务、取消/失败、日志、主题、刷新、退出及重启。默认把 JSON/Markdown 报告和截图写入 `build-review/desktop-qa`，可通过 `MINIREDIS_QA_OUTPUT` 修改。使用 `MINIREDIS_TEST_ELECTRON=/绝对路径/miniredis-desktop` 验证打包产物时，还会检查缺少源码目录的独立客户端行为。
+
+核心模块的覆盖率报告在 `build-review/desktop-coverage`。统计范围为 RESP、连接会话、监控传输、配置存储、进程管理、命令解析和界面状态；Vue 模板、Electron IPC/窗口入口通过真实窗口用例验证，不包含在该单测百分比中。CI 设置行覆盖率 90%、分支 80%、语句 88%、函数 85% 的最低门槛。
+
+| 验证范围 | 正常及异常场景 | 方法 |
+| :--- | :--- | :--- |
+| 连接与认证 | 新建、仅保存、编辑、搜索、删除、错误密码、无密码、具名只读 ACL、移除密码 | 界面操作 + 真实 C++ 实例 |
+| 命令与输出 | 当前行、选区、快捷键、全部模板、空值/数组/整数/Unicode、错误脚本、重复响应、历史隔离、大响应、复制与导出 | 界面操作 + RESP/解析单测 |
+| 监控 | 自动/手动采样、未就绪、HTTP 错误、非法 JSON、超大响应、断线旧数据、跨连接迟到响应 | 真实数据 + 受控 TCP/HTTP 故障服务 |
+| 复制与集群 | 副本只读、slot 迁移、MEET、手动接管、自动选主及节点停止 | 独立端口的真实多节点实例 |
+| 本地实例与任务 | 四种模式、持久化重启、端口冲突、七种脚本、失败/取消、进程组强制停止、运行中退出 | 界面操作 + 真实子进程 |
+| 状态与配置 | 刷新恢复连接及进行中的执行、删除缓存、系统主题、重启密码策略、磁盘/密钥环失败、并发编辑 | 界面操作 + 定时与文件系统回归单测 |
+
+测试使用独立用户目录和临时实例。正常功能走真实服务，故障服务仅用于超时、断线、非法协议和 HTTP 失败。原生文件选择/保存对话框的返回路径与取消结果由测试注入，后续文件读写仍实际执行；真实系统密钥环的可用性取决于测试主机，加密/解密失败由单测覆盖。Linux 的实测结果不代表 Windows/macOS 已通过验证，也不代表所有源码分支已达到 100% 覆盖。
 
 ## 集成测试覆盖
 

@@ -18,6 +18,8 @@ async function server(
   const sockets = new Set<net.Socket>();
   const server = net.createServer((socket) => {
     sockets.add(socket);
+    // Cancellation deliberately closes peers while responses may still be in flight.
+    socket.on("error", () => {});
     socket.on("close", () => sockets.delete(socket));
     const decoder = new RespDecoder();
     socket.on("data", (chunk) => {
@@ -74,6 +76,110 @@ async function session(
 }
 
 describe("live RESP sessions", () => {
+  it("sends named authentication even when the named account has an empty password", async () => {
+    const received: string[][] = [];
+    const port = await server((parts) => {
+      received.push(parts);
+      return parts[0] === "AUTH" ? "+OK\r\n" : undefined;
+    });
+    const connection = new RespConnection("127.0.0.1", port);
+    cleanup.push(() => connection.close());
+    await connection.open("nopass-user", "");
+    expect(received[0]).toEqual(["AUTH", "nopass-user", ""]);
+  });
+  it("respects redirect settings and bounds cycles", async () => {
+    let address = "";
+    const port = await server((parts) =>
+      parts[0] === "GET" ? `-MOVED 1 ${address}\r\n` : undefined,
+    );
+    address = `127.0.0.1:${port}`;
+    const events: DesktopEvent[] = [];
+    const disabled = new RedisSession(
+      { ...profile(port), followRedirects: false },
+      "",
+      "",
+      (event) => events.push(event),
+    );
+    cleanup.push(() => disabled.disconnect());
+    await disabled.connect();
+    await disabled.execute("GET a", "disabled");
+    expect(
+      events.filter((event) => event.type === "result").at(-1)?.result.response,
+    ).toEqual({ type: "error", value: `MOVED 1 ${address}` });
+    const followed = await session(port, events);
+    await followed.execute("GET a", "cycle");
+    expect(
+      events.filter((event) => event.type === "result").at(-1)?.result.response,
+    ).toMatchObject({ type: "error", value: expect.stringContaining("3 次") });
+  });
+  it("rejects malformed redirects and denied ASKING without sending the write", async () => {
+    const denied: string[][] = [];
+    const target = await server((parts) => {
+      denied.push(parts);
+      return parts[0] === "ASKING" ? "-NOPERM denied\r\n" : undefined;
+    });
+    const origin = await server((parts) =>
+      parts[0] === "SET"
+        ? `-ASK 1 127.0.0.1:${target}\r\n`
+        : parts[0] === "GET"
+          ? "-MOVED 1 missing-port\r\n"
+          : undefined,
+    );
+    const events: DesktopEvent[] = [];
+    const connection = await session(origin, events);
+    await connection.execute("SET a b\nGET a", "bad");
+    expect(denied.some((parts) => parts[0] === "SET")).toBe(false);
+    const results = events.filter((event) => event.type === "result");
+    expect(results[0].result.response).toMatchObject({
+      type: "error",
+      value: "NOPERM denied",
+    });
+    expect(results[1].result.transportError).toBe(true);
+  });
+  it("cleans up a cancelled connection attempt and recovers after a malformed protocol frame", async () => {
+    let notify!: () => void;
+    const pending = new Promise<void>((done) => {
+      notify = done;
+    });
+    const port = await server((parts) => {
+      if (parts[0] === "INFO") notify();
+      return parts[0] === "INFO"
+        ? "$13\r\nrole:master\r\n\r\n"
+        : parts[0] === "BAD"
+          ? "?invalid\r\n"
+          : undefined;
+    });
+    const events: DesktopEvent[] = [];
+    const connection = new RedisSession(profile(port), "", "", (event) =>
+      events.push(event),
+    );
+    cleanup.push(() => connection.disconnect());
+    const connecting = connection.connect();
+    await pending;
+    connection.disconnect();
+    await expect(connecting).rejects.toThrow();
+    expect(connection.state.status).toBe("disconnected");
+    await connection.connect();
+    await connection.execute("BAD\nSET must-not-run yes", "malformed");
+    expect(connection.state.status).toBe("error");
+    expect(events.filter((event) => event.type === "result")).toHaveLength(1);
+  });
+  it("rejects offline commands and propagates INFO permission failures", async () => {
+    let deny = false;
+    const port = await server((parts) =>
+      deny && parts[0] === "INFO" ? "-NOPERM INFO denied\r\n" : undefined,
+    );
+    const events: DesktopEvent[] = [];
+    const connection = await session(port, events);
+    deny = true;
+    await expect(connection.topology()).rejects.toThrow("denied");
+    connection.disconnect();
+    await connection.execute("PING", "offline");
+    expect(
+      events.filter((event) => event.type === "result").at(-1)?.result
+        .transportError,
+    ).toBe(true);
+  });
   it("retries the exact redirected command and retains repeated responses", async () => {
     const received: string[][] = [];
     const target = await server((parts) => {

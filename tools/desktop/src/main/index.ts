@@ -77,10 +77,32 @@ function session(id: string): RedisSession {
   return connection;
 }
 
+async function connectProfile(id: string): Promise<void> {
+  const password = await store.password(id);
+  const profile = store.get(id);
+  sessions.get(id)?.disconnect();
+  const connection = new RedisSession(
+    profile,
+    profile.username,
+    password,
+    (event) => {
+      if (sessions.get(id) === connection) emit(event);
+    },
+  );
+  sessions.set(id, connection);
+  await connection.connect();
+}
+
 function registerHandlers(): void {
   const handlers: Record<string, (input: any) => unknown> = {
     workspace: (): Workspace => ({
       profiles: store.list(),
+      connections: [...sessions.values()].map((session) => ({
+        ...session.state,
+      })),
+      running: [...sessions]
+        .filter(([, session]) => session.executing)
+        .map(([id]) => id),
       theme: store.theme,
       selectedId: store.selectedId,
       binary,
@@ -102,19 +124,7 @@ function registerHandlers(): void {
     },
     preferences: (input: { theme?: Theme; selectedId?: string | null }) =>
       store.preferences(input),
-    connect: async (id: string) => {
-      const profile = store.get(id);
-      const password = await store.password(id);
-      sessions.get(id)?.disconnect();
-      const connection = new RedisSession(
-        profile,
-        profile.username,
-        password,
-        emit,
-      );
-      sessions.set(id, connection);
-      await connection.connect();
-    },
+    connect: (id: string) => connectProfile(id),
     disconnect: (id: string) => {
       store.get(id);
       sessions.get(id)?.disconnect();
@@ -169,10 +179,7 @@ function registerHandlers(): void {
         color: node.label.includes("Replica") ? "#8b5cf6" : "#3b82f6",
         followRedirects: true,
       });
-      sessions.get(profile.id)?.disconnect();
-      const connection = new RedisSession(profile, "", password, emit);
-      sessions.set(profile.id, connection);
-      await connection.connect();
+      await connectProfile(profile.id);
       return profile;
     },
     copyText: (text: string) => {

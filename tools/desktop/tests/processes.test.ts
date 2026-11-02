@@ -1,4 +1,6 @@
 import net from "node:net";
+import { spawn } from "node:child_process";
+import { PassThrough } from "node:stream";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -9,6 +11,7 @@ import {
   LogBook,
   TaskManager,
   validateLocal,
+  terminate,
 } from "../src/main/processes";
 import { monitoring, RedisSession } from "../src/main/redis";
 import type {
@@ -61,6 +64,104 @@ async function until(
 }
 
 describe("owned processes", () => {
+  it.each([
+    { mode: "bad" },
+    { port: 0 },
+    { statsPort: 65536 },
+    { ioThreads: 0 },
+    { shards: 0 },
+    { memoryMiB: -1 },
+    { eviction: "invalid" },
+    { password: "x".repeat(4097) },
+  ])("rejects invalid local configuration", (changes) => {
+    expect(() =>
+      validateLocal({ ...config(24000, 24100), ...changes } as LocalConfig),
+    ).toThrow();
+  });
+  it("does not touch an unrelated process listening on a requested port", async () => {
+    const listener = net.createServer();
+    await new Promise<void>((done) => listener.listen(0, "127.0.0.1", done));
+    cleanups.push(
+      () => new Promise<void>((done) => listener.close(() => done())),
+    );
+    const local = new LocalManager(
+      await directory(),
+      () => {},
+      new LogBook(() => {}),
+    );
+    await expect(
+      local.start(
+        config((listener.address() as net.AddressInfo).port, await freePort()),
+      ),
+    ).rejects.toThrow("被占用");
+    expect(listener.listening).toBe(true);
+    expect(local.list()).toEqual([]);
+    await expect(local.stopNode("absent")).rejects.toThrow("不存在");
+    expect(() => local.connection("absent")).toThrow("未就绪");
+  });
+  it("forces termination when an owned process ignores SIGTERM", async () => {
+    const child = spawn(
+      process.execPath,
+      [
+        "-e",
+        "process.on('SIGTERM',()=>{});process.stdout.write('ready');setInterval(()=>{},1000)",
+      ],
+      { detached: true, stdio: ["ignore", "pipe", "pipe"] },
+    );
+    cleanups.push(() => terminate(child));
+    await new Promise((done) => child.stdout.once("data", done));
+    await terminate(child);
+    expect(child.signalCode).toBe("SIGKILL");
+  });
+  it("redacts split UTF-8 log streams and bounds retained log entries", async () => {
+    const logs = new LogBook(() => {});
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    logs.pipe({ stdout, stderr } as never, "fixture", ["private-fixture"]);
+    const bytes = Buffer.from("你好 private-fixture\n");
+    stdout.write(bytes.subarray(0, 2));
+    stdout.write(bytes.subarray(2, 12));
+    stdout.end(bytes.subarray(12));
+    stderr.end("last line");
+    await delay(0);
+    expect(
+      logs
+        .list()
+        .map((entry) => entry.text)
+        .join("\n"),
+    ).toContain("你好 ••••••");
+    expect(JSON.stringify(logs.list())).not.toContain("private-fixture");
+    for (let i = 0; i < 510; i++) logs.add("fixture", "x".repeat(20000));
+    expect(logs.list()).toHaveLength(500);
+    expect(logs.list()[0].text).toHaveLength(16384);
+  });
+  it("rejects missing source roots, unsupported tasks and invalid parameters", async () => {
+    const input = {
+      kind: "benchmark" as const,
+      binary: "/bin/true",
+      requests: 1,
+      clients: 1,
+      payload: 1,
+      runs: 1,
+    };
+    const path = await directory();
+    const absent = new TaskManager(null, path, () => {}, new LogBook(() => {}));
+    await expect(absent.run(input)).rejects.toThrow("源码目录");
+    const tasks = new TaskManager(path, path, () => {}, new LogBook(() => {}));
+    for (const changes of [
+      { kind: "unknown" },
+      { requests: 0 },
+      { clients: 0 },
+      { payload: 0 },
+      { runs: 6 },
+    ])
+      await expect(
+        tasks.run({ ...input, ...changes } as typeof input),
+      ).rejects.toThrow();
+    await expect(tasks.run({ ...input, binary: "/missing" })).rejects.toThrow(
+      "不存在",
+    );
+  });
   it("rejects overlapping port ranges", () => {
     expect(() =>
       validateLocal({ ...config(30000, 30001), mode: "cluster" }),

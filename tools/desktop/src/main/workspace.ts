@@ -67,7 +67,7 @@ export function validateProfile(
 export class WorkspaceStore {
   private profiles: StoredProfile[] = [];
   private readonly passwords = new Map<string, string>();
-  private writeQueue: Promise<void> = Promise.resolve();
+  private mutationQueue: Promise<void> = Promise.resolve();
   theme: Theme = "light";
   selectedId: string | null = null;
 
@@ -144,94 +144,107 @@ export class WorkspaceStore {
     return profile;
   }
 
-  async password(id: string): Promise<string> {
-    this.get(id);
-    if (this.passwords.has(id)) return this.passwords.get(id)!;
-    const secret = this.profiles.find((profile) => profile.id === id)?.secret;
-    if (!secret) return "";
-    try {
-      if (!this.secrets.available()) throw new Error("密钥环不可用");
-      const password = await this.secrets.decrypt(secret);
-      this.passwords.set(id, password);
-      return password;
-    } catch {
-      throw new Error("无法访问已保存的密码，请在编辑连接中重新输入");
-    }
+  private serialize<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.mutationQueue.then(operation);
+    this.mutationQueue = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
   }
 
-  async save(input: ConnectionInput): Promise<ConnectionProfile> {
-    const profile = validateProfile(input);
-    const existing = input.id
-      ? this.profiles.find((item) => item.id === input.id)
-      : undefined;
-    if (input.id && !existing) throw new Error("连接不存在");
-    if (!existing && this.profiles.length >= 100)
-      throw new Error("最多保存 100 个连接");
-    const id = existing?.id ?? randomUUID();
-    let secret = existing?.secret;
-    if (input.forgetPassword) {
-      secret = undefined;
-      this.passwords.delete(id);
-    }
-    if (input.password !== undefined && input.password !== "") {
-      this.passwords.set(id, input.password);
-      secret = this.secrets.available()
-        ? await this.secrets.encrypt(input.password)
+  password(id: string): Promise<string> {
+    return this.serialize(async () => {
+      this.get(id);
+      if (this.passwords.has(id)) return this.passwords.get(id)!;
+      const secret = this.profiles.find((profile) => profile.id === id)?.secret;
+      if (!secret) return "";
+      try {
+        if (!this.secrets.available()) throw new Error("密钥环不可用");
+        const password = await this.secrets.decrypt(secret);
+        this.passwords.set(id, password);
+        return password;
+      } catch {
+        throw new Error("无法访问已保存的密码，请在编辑连接中重新输入");
+      }
+    });
+  }
+
+  save(input: ConnectionInput): Promise<ConnectionProfile> {
+    return this.serialize(async () => {
+      const profile = validateProfile(input);
+      const existing = input.id
+        ? this.profiles.find((item) => item.id === input.id)
         : undefined;
-    }
-    const next = { ...profile, id, secret };
-    if (existing)
-      this.profiles = this.profiles.map((item) =>
-        item.id === id ? next : item,
-      );
-    else this.profiles.push(next);
-    this.selectedId = id;
-    await this.persist();
-    return this.get(id);
+      if (input.id && !existing) throw new Error("连接不存在");
+      if (!existing && this.profiles.length >= 100)
+        throw new Error("最多保存 100 个连接");
+      const id = existing?.id ?? randomUUID();
+      let secret = input.forgetPassword ? undefined : existing?.secret;
+      let password = input.forgetPassword ? undefined : this.passwords.get(id);
+      if (input.password !== undefined && input.password !== "") {
+        password = input.password;
+        secret = this.secrets.available()
+          ? await this.secrets.encrypt(password)
+          : undefined;
+      }
+      const next = { ...profile, id, secret };
+      const profiles = existing
+        ? this.profiles.map((item) => (item.id === id ? next : item))
+        : [...this.profiles, next];
+      await this.persist(profiles, this.theme, id);
+      this.profiles = profiles;
+      this.selectedId = id;
+      if (password === undefined) this.passwords.delete(id);
+      else this.passwords.set(id, password);
+      return this.get(id);
+    });
   }
 
-  async remove(id: string): Promise<void> {
-    this.get(id);
-    this.profiles = this.profiles.filter((item) => item.id !== id);
-    this.passwords.delete(id);
-    if (this.selectedId === id) this.selectedId = this.profiles[0]?.id ?? null;
-    await this.persist();
+  remove(id: string): Promise<void> {
+    return this.serialize(async () => {
+      this.get(id);
+      const profiles = this.profiles.filter((item) => item.id !== id);
+      const selectedId =
+        this.selectedId === id ? (profiles[0]?.id ?? null) : this.selectedId;
+      await this.persist(profiles, this.theme, selectedId);
+      this.profiles = profiles;
+      this.passwords.delete(id);
+      this.selectedId = selectedId;
+    });
   }
 
-  async preferences(input: {
+  preferences(input: {
     theme?: Theme;
     selectedId?: string | null;
   }): Promise<void> {
-    if (input.theme !== undefined) {
-      if (!["light", "dark", "system"].includes(input.theme))
+    return this.serialize(async () => {
+      if (!input || typeof input !== "object") throw new Error("设置格式无效");
+      const theme = input.theme ?? this.theme;
+      if (!["light", "dark", "system"].includes(theme))
         throw new Error("主题无效");
-      this.theme = input.theme;
-    }
-    if (input.selectedId !== undefined) {
-      if (input.selectedId !== null) this.get(input.selectedId);
-      this.selectedId = input.selectedId;
-    }
-    await this.persist();
+      const selectedId =
+        input.selectedId === undefined ? this.selectedId : input.selectedId;
+      if (selectedId !== null) this.get(selectedId);
+      await this.persist(this.profiles, theme, selectedId);
+      this.theme = theme;
+      this.selectedId = selectedId;
+    });
   }
 
-  private persist(): Promise<void> {
+  private async persist(
+    profiles: StoredProfile[],
+    theme: Theme,
+    selectedId: string | null,
+  ): Promise<void> {
     const body = JSON.stringify(
-      {
-        version: 1,
-        profiles: this.profiles,
-        theme: this.theme,
-        selectedId: this.selectedId,
-      },
+      { version: 1, profiles, theme, selectedId },
       null,
       2,
     );
-    const write = async (): Promise<void> => {
-      await mkdir(this.directory, { recursive: true, mode: 0o700 });
-      const filename = join(this.directory, "workspace.json");
-      await writeFile(`${filename}.tmp`, body, { mode: 0o600 });
-      await rename(`${filename}.tmp`, filename);
-    };
-    this.writeQueue = this.writeQueue.then(write, write);
-    return this.writeQueue;
+    await mkdir(this.directory, { recursive: true, mode: 0o700 });
+    const filename = join(this.directory, "workspace.json");
+    await writeFile(`${filename}.tmp`, body, { mode: 0o600 });
+    await rename(`${filename}.tmp`, filename);
   }
 }

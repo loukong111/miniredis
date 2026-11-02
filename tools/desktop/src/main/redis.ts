@@ -76,7 +76,7 @@ export class RespConnection {
       this.socket.connect(this.port, this.host);
     });
     try {
-      if (password) {
+      if (username || password) {
         const response = await this.request(
           username ? ["AUTH", username, password] : ["AUTH", password],
         );
@@ -148,6 +148,10 @@ export class RedisSession {
   private controller: AbortController | null = null;
   private activeTransport: RespConnection | null = null;
   state: ConnectionState;
+
+  get executing(): boolean {
+    return this.controller !== null;
+  }
 
   constructor(
     readonly profile: ConnectionProfile,
@@ -302,6 +306,11 @@ export class RedisSession {
     if (this.controller) throw new Error("该连接已有命令正在执行");
     const controller = new AbortController();
     this.controller = controller;
+    this.emit({
+      type: "execution",
+      connectionId: this.profile.id,
+      running: true,
+    });
     const generation = this.generation;
     return this.serialize(async () => {
       let count = 0;
@@ -357,7 +366,14 @@ export class RedisSession {
         };
       } finally {
         this.activeTransport = null;
-        if (this.controller === controller) this.controller = null;
+        if (this.controller === controller) {
+          this.controller = null;
+          this.emit({
+            type: "execution",
+            connectionId: this.profile.id,
+            running: false,
+          });
+        }
       }
     });
   }
@@ -369,8 +385,15 @@ export class RedisSession {
       if (replication.type === "error") throw new Error(replication.value);
       if (replication.type === "bulk")
         this.updateRole(parseInfo(replication.value));
+      const clusterInfo = (await this.command(["INFO", "cluster"])).response;
+      const clusterEnabled =
+        clusterInfo.type === "bulk"
+          ? parseInfo(clusterInfo.value).cluster_enabled
+          : undefined;
       const cluster = (await this.command(["CLUSTER", "NODES"])).response;
       return {
+        clusterEnabled:
+          clusterEnabled === undefined ? undefined : clusterEnabled === "1",
         replication:
           replication.type === "bulk" ? parseInfo(replication.value) : {},
         clusterError:

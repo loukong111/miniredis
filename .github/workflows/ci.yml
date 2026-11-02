@@ -127,18 +127,21 @@ jobs:
       - name: Desktop backend tests
         env:
           MINIREDIS_TEST_BINARY: ../../build/miniredis
-        run: npm test --prefix tools/desktop
+        run: npm run test:coverage --prefix tools/desktop
       - name: Build desktop
         run: npm run build --prefix tools/desktop
       - name: Package desktop
         working-directory: tools/desktop
         run: npx electron-builder --dir
-      - name: Desktop UI smoke
+      - name: Desktop UI workflows
         env:
           MINIREDIS_TEST_NO_SANDBOX: '1'
           MINIREDIS_TEST_ELECTRON: ${{ github.workspace }}/tools/desktop/release/linux-unpacked/miniredis-desktop
           MINIREDIS_SCREENSHOTS: /tmp/miniredis-desktop-screens
-        run: xvfb-run -a npm run test:desktop --prefix tools/desktop
+          MINIREDIS_QA_OUTPUT: /tmp/miniredis-desktop-screens
+        run: |
+          xvfb-run -a npm run test:desktop --prefix tools/desktop
+          xvfb-run -a npm run test:branches --prefix tools/desktop
       - name: Upload desktop screenshots
         uses: actions/upload-artifact@v4
         with:

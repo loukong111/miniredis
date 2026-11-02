@@ -16,12 +16,15 @@
     "test": "vitest run",
     "test:desktop": "node tests/desktop-smoke.mjs",
     "package": "npm run build && electron-builder --dir",
-    "postinstall": "install-electron"
+    "postinstall": "install-electron",
+    "test:branches": "node tests/desktop-branches.mjs",
+    "test:coverage": "vitest run --coverage"
   },
   "devDependencies": {
     "@lucide/vue": "^1.66.0",
     "@types/node": "^24.0.0",
     "@vitejs/plugin-vue": "^6.0.10",
+    "@vitest/coverage-v8": "^5.0.5",
     "electron": "^45.2.1",
     "electron-builder": "^26.18.0",
     "electron-vite": "^6.0.0",

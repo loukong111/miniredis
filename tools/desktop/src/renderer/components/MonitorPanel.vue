@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import { NButton, NDrawer, NDrawerContent } from "naive-ui";
 import {
   Activity,
@@ -35,6 +35,14 @@ const metricsOpen = ref(false);
 const metrics = ref("");
 const metricsLoading = ref(false);
 const metricsError = ref("");
+let metricsGeneration = 0;
+watch([() => state.selectedId, connected, () => state.page], () => {
+  metricsGeneration++;
+  metricsOpen.value = false;
+  metricsLoading.value = false;
+  metrics.value = "";
+  metricsError.value = "";
+});
 const cards = computed(() => [
   {
     label: "每秒命令",
@@ -78,17 +86,21 @@ function date(value: unknown): string {
     : "暂无记录";
 }
 async function showMetrics(): Promise<void> {
-  if (!active.value) return;
+  const id = active.value?.id;
+  if (!id || !connected.value) return;
+  const generation = ++metricsGeneration;
   metricsOpen.value = true;
   metricsLoading.value = true;
   metricsError.value = "";
   try {
-    metrics.value = await window.desktop.metrics(active.value.id);
+    const value = await window.desktop.metrics(id);
+    if (generation === metricsGeneration) metrics.value = value;
   } catch (error) {
+    if (generation !== metricsGeneration) return;
     metricsError.value = errorText(error);
     notice(metricsError.value, "error");
   } finally {
-    metricsLoading.value = false;
+    if (generation === metricsGeneration) metricsLoading.value = false;
   }
 }
 </script>

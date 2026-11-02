@@ -70,6 +70,7 @@ export interface ClusterNode {
 }
 
 export interface TopologySnapshot {
+  clusterEnabled?: boolean;
   replication: Record<string, string>;
   nodes: ClusterNode[];
   clusterError?: string;
@@ -133,6 +134,8 @@ export interface LogEntry {
 
 export interface Workspace {
   profiles: ConnectionProfile[];
+  connections: ConnectionState[];
+  running: string[];
   theme: Theme;
   selectedId: string | null;
   binary: string;
@@ -143,6 +146,7 @@ export interface Workspace {
 }
 
 export type DesktopEvent =
+  | { type: "execution"; connectionId: string; running: boolean }
   | { type: "connection"; state: ConnectionState }
   | { type: "result"; result: CommandResult }
   | { type: "local"; nodes: LocalNode[] }

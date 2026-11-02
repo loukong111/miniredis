@@ -7,6 +7,8 @@ import {
   NModal,
   NSwitch,
   darkTheme,
+  zhCN,
+  dateZhCN,
   type GlobalThemeOverrides,
 } from "naive-ui";
 import {
@@ -49,6 +51,7 @@ import {
   connection,
   errorText,
   initialize,
+  forgetConnection,
   isDark,
   notice,
   number,
@@ -131,9 +134,7 @@ async function deleteConnection(): Promise<void> {
   try {
     const id = deleting.value.id;
     await window.desktop.deleteConnection(id);
-    state.profiles = state.profiles.filter((profile) => profile.id !== id);
-    if (state.selectedId === id)
-      state.selectedId = state.profiles[0]?.id ?? null;
+    forgetConnection(id);
     deleting.value = null;
     notice("连接已删除");
   } catch (error) {
@@ -170,6 +171,8 @@ onMounted(initialize);
 
 <template>
   <NConfigProvider
+    :locale="zhCN"
+    :date-locale="dateZhCN"
     :theme="isDark ? darkTheme : null"
     :theme-overrides="themeOverrides"
   >

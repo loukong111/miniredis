@@ -47,7 +47,11 @@ const isReplica = computed(
   () => role.value === "slave" || role.value === "replica",
 );
 const roleName = computed(() =>
-  !role.value ? "未知角色" : isReplica.value ? "Replica" : "Primary",
+  role.value === "master"
+    ? "Primary"
+    : isReplica.value
+      ? "Replica"
+      : "未知角色",
 );
 
 async function refresh(): Promise<void> {
@@ -55,6 +59,7 @@ async function refresh(): Promise<void> {
   const token = ++generation;
   const id = active.value?.id;
   if (!connected.value || !id || state.page !== "topology") {
+    if (!connected.value || !id) topology.value = null;
     loading.value = false;
     return;
   }
@@ -64,7 +69,10 @@ async function refresh(): Promise<void> {
     const value = await window.desktop.topology(id);
     if (token === generation) topology.value = value;
   } catch (cause) {
-    if (token === generation) error.value = errorText(cause);
+    if (token === generation) {
+      error.value = errorText(cause);
+      topology.value = null;
+    }
   } finally {
     if (token === generation) {
       loading.value = false;
@@ -234,7 +242,12 @@ onBeforeUnmount(() => {
           </div>
         </dl>
         <NPopconfirm
-          v-if="isReplica && !stats?.failover_enabled"
+          v-if="
+            connected &&
+            isReplica &&
+            topology?.clusterEnabled &&
+            stats?.failover_enabled === false
+          "
           @positive-click="
             state.page = 'workbench';
             execute('CLUSTER FAILOVER TAKEOVER');
@@ -256,7 +269,9 @@ onBeforeUnmount(() => {
         <div class="toolbar-actions">
           <NButton
             size="small"
-            :disabled="!connected || !topology?.nodes.length"
+            :disabled="
+              !connected || !topology?.clusterEnabled || !topology?.nodes.length
+            "
             @click="
               operation = 'migrate';
               form.target = '';
@@ -265,7 +280,9 @@ onBeforeUnmount(() => {
             >迁移槽位</NButton
           ><NButton
             size="small"
-            :disabled="!connected || !topology?.nodes.length"
+            :disabled="
+              !connected || !topology?.clusterEnabled || !topology?.nodes.length
+            "
             @click="
               operation = 'meet';
               form.target = '';

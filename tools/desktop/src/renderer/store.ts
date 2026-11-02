@@ -14,11 +14,11 @@ import type {
 
 export interface Sample {
   time: number;
-  total: number;
+  total: number | null;
   qps: number | null;
-  memory: number;
-  latency: number;
-  clients: number;
+  memory: number | null;
+  latency: number | null;
+  clients: number | null;
 }
 
 export const state = reactive({
@@ -62,11 +62,15 @@ export const connected = computed(
   () => connection.value?.status === "connected",
 );
 export const snapshot = computed(() =>
-  state.selectedId ? state.snapshots[state.selectedId] : undefined,
+  connected.value && state.selectedId
+    ? state.snapshots[state.selectedId]
+    : undefined,
 );
 export const stats = computed(() => snapshot.value?.stats);
 export const samples = computed(() =>
-  state.selectedId ? (state.samples[state.selectedId] ?? []) : [],
+  snapshot.value?.stats && state.selectedId
+    ? (state.samples[state.selectedId] ?? [])
+    : [],
 );
 export const isDark = computed(
   () =>
@@ -119,18 +123,24 @@ function applySnapshot(value: MonitoringSnapshot): void {
   if (!value.stats) return;
   const history = (state.samples[value.connectionId] ??= []);
   const last = history.at(-1);
-  const total = Number(value.stats.total_commands ?? 0);
+  const metric = (value: unknown): number | null =>
+    typeof value === "number" && Number.isFinite(value) ? value : null;
+  const total = metric(value.stats.total_commands);
   const elapsed = last ? value.timestamp - last.time : 0;
   history.push({
     time: value.timestamp,
     total,
     qps:
-      last && elapsed > 0 && total >= last.total
+      last &&
+      total !== null &&
+      last.total !== null &&
+      elapsed > 0 &&
+      total >= last.total
         ? ((total - last.total) * 1000) / elapsed
         : null,
-    memory: Number(value.stats.used_memory_bytes ?? 0),
-    latency: Number(value.stats.avg_command_latency_us ?? 0),
-    clients: Number(value.stats.connected_clients ?? 0),
+    memory: metric(value.stats.used_memory_bytes),
+    latency: metric(value.stats.avg_command_latency_us),
+    clients: metric(value.stats.connected_clients),
   });
   if (history.length > 60) history.shift();
 }
@@ -181,7 +191,11 @@ export async function initialize(): Promise<void> {
         delete state.samples[event.state.id];
         delete state.snapshots[event.state.id];
       }
+      if (["disconnected", "error"].includes(event.state.status))
+        state.running[event.state.id] = false;
       if (event.state.id === state.selectedId) refreshMonitoring();
+    } else if (event.type === "execution") {
+      state.running[event.connectionId] = event.running;
     } else if (event.type === "result") {
       const output = (state.results[event.result.connectionId] ??= []);
       output.push(event.result);
@@ -204,6 +218,16 @@ export async function initialize(): Promise<void> {
       window.desktop.taskState(),
       window.desktop.logs(),
     ]);
+    state.connections = {
+      ...Object.fromEntries(
+        workspace.connections.map((connection) => [connection.id, connection]),
+      ),
+      ...state.connections,
+    };
+    state.running = {
+      ...Object.fromEntries(workspace.running.map((id) => [id, true])),
+      ...state.running,
+    };
     state.workspace = workspace;
     state.profiles = workspace.profiles;
     state.selectedId = workspace.selectedId;
@@ -217,20 +241,49 @@ export async function initialize(): Promise<void> {
   }
 }
 
+const connectionAttempts = new Map<string, symbol>();
+const executionAttempts = new Map<string, string>();
+
 export async function connectProfile(id: string): Promise<void> {
   if (state.connections[id]?.status === "connecting") return;
+  const attempt = Symbol(id);
+  connectionAttempts.set(id, attempt);
+  const current = () =>
+    connectionAttempts.get(id) === attempt &&
+    state.profiles.some((profile) => profile.id === id);
   state.connections[id] = { id, status: "connecting" };
   try {
     await window.desktop.connect(id);
+    if (!current() || state.connections[id]?.status !== "connected") return;
     notice(
       "已连接到 " +
         (state.profiles.find((profile) => profile.id === id)?.name ?? "实例"),
       "success",
     );
   } catch (error) {
+    if (!current() || state.connections[id]?.status === "disconnected") return;
     state.connections[id] = { id, status: "error", error: errorText(error) };
     notice(errorText(error), "error");
+  } finally {
+    if (connectionAttempts.get(id) === attempt) connectionAttempts.delete(id);
   }
+}
+
+export function forgetConnection(id: string): void {
+  connectionAttempts.delete(id);
+  executionAttempts.delete(id);
+  state.profiles = state.profiles.filter((profile) => profile.id !== id);
+  for (const collection of [
+    state.connections,
+    state.running,
+    state.results,
+    state.history,
+    state.scripts,
+    state.snapshots,
+    state.samples,
+  ])
+    delete collection[id];
+  if (state.selectedId === id) state.selectedId = state.profiles[0]?.id ?? null;
 }
 
 export async function execute(scriptText: string): Promise<void> {
@@ -241,6 +294,7 @@ export async function execute(scriptText: string): Promise<void> {
     return;
   }
   const runId = crypto.randomUUID();
+  executionAttempts.set(id, runId);
   state.running[id] = true;
   try {
     const outcome = await window.desktop.execute({
@@ -267,7 +321,12 @@ export async function execute(scriptText: string): Promise<void> {
   } catch (error) {
     notice(errorText(error), "error");
   } finally {
-    state.running[id] = false;
+    if (executionAttempts.get(id) === runId) {
+      executionAttempts.delete(id);
+      if (state.profiles.some((profile) => profile.id === id))
+        state.running[id] = false;
+      else delete state.running[id];
+    }
   }
 }
 
