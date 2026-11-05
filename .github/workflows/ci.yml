@@ -142,7 +142,8 @@ jobs:
         run: |
           xvfb-run -a npm run test:desktop --prefix tools/desktop
           xvfb-run -a npm run test:branches --prefix tools/desktop
-      - name: Upload desktop screenshots
+      - name: Upload desktop diagnostics
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: desktop-screenshots

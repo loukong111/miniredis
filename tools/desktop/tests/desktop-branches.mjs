@@ -131,10 +131,21 @@ async function clearResults() {
   if (await clear.isEnabled()) await clear.click();
   await expect(page.getByTestId("result-card")).toHaveCount(0);
 }
+async function waitWritable(port) {
+  await expect
+    .poll(
+      async () =>
+        (await query(port, ["INFO", "replication"], "qa-local-password")).value,
+      { message: "主节点应取得多数派写入许可", timeout: 15000 },
+    )
+    .toMatch(/^failover_writes_allowed:1\r?$/m);
+}
 async function snapshot(key) {
   await page.screenshot({ path: join(qa.artifacts, key + ".png") });
 }
 async function exportDialog(filePath, canceled = false) {
+  // Leave the response tooltip before clicking actions in the results header.
+  await page.mouse.move(0, 0);
   await app.evaluate(
     ({ dialog }, result) => {
       globalThis.qaOriginalSaveDialog ??= dialog.showSaveDialog;
@@ -745,9 +756,31 @@ try {
           .toBe(count);
         await expect(page.locator(".connection-badge")).toHaveText("已连接");
         await closeTools();
+        // An authenticated connection can precede the first quorum probe.
+        if (mode === "failover") await waitWritable(range.port);
         await clearResults();
         await script('SET qa:local "persistent value"\nGET qa:local');
+        await expect(page.getByTestId("result-card")).toHaveCount(2);
+        await expect(
+          page.getByTestId("result-card").first().locator("pre"),
+        ).toHaveText("OK");
         await expect(lastCard().locator("pre")).toHaveText("persistent value");
+        if (mode === "replication" || mode === "failover") {
+          for (let index = 1; index < count; index++)
+            await expect
+              .poll(
+                async () =>
+                  (
+                    await query(
+                      range.port + index,
+                      ["GET", "qa:local"],
+                      "qa-local-password",
+                    )
+                  ).value,
+                { timeout: 10000 },
+              )
+              .toBe("persistent value");
+        }
         await page.getByTestId("nav-topology").click();
         await expect(page.locator(".topology-page")).toContainText("Primary");
         if (mode === "cluster")
@@ -840,19 +873,6 @@ try {
             },
           );
         if (mode === "replication") {
-          await expect
-            .poll(
-              async () =>
-                (
-                  await query(
-                    range.port + 1,
-                    ["GET", "qa:local"],
-                    "qa-local-password",
-                  )
-                ).value,
-              { timeout: 10000 },
-            )
-            .toBe("persistent value");
           await page.getByTestId("open-local").click();
           await page
             .getByRole("button", { name: "连接此节点", exact: true })
@@ -900,6 +920,33 @@ try {
             "Primary",
             { timeout: 12000 },
           );
+          await waitWritable(range.port + 1);
+          await clearResults();
+          await script(
+            'GET qa:local\nSET qa:after-failover "elected value"\nGET qa:after-failover',
+          );
+          await expect(page.getByTestId("result-card")).toHaveCount(3);
+          await expect(
+            page.getByTestId("result-card").nth(0).locator("pre"),
+          ).toHaveText("persistent value");
+          await expect(
+            page.getByTestId("result-card").nth(1).locator("pre"),
+          ).toHaveText("OK");
+          await expect(lastCard().locator("pre")).toHaveText("elected value");
+          await expect
+            .poll(
+              async () =>
+                (
+                  await query(
+                    range.port + 2,
+                    ["GET", "qa:after-failover"],
+                    "qa-local-password",
+                  )
+                ).value,
+              { timeout: 10000 },
+            )
+            .toBe("elected value");
+          await page.getByTestId("nav-topology").click();
         }
         await snapshot("local-" + mode);
         await page.getByTestId("open-local").click();
